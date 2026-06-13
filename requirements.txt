@@ -1,0 +1,16 @@
+# AI 整合核心
+litellm
+google-generativeai
+groq
+huggingface_hub
+
+# Discord 機器人開發
+discord.py
+
+# 翻譯功能
+deep-translator
+
+# 工具庫
+aiosqlite
+psutil
+python-dotenv
