@@ -35,4 +35,19 @@
 *   **授權**：MIT License
 
 ---
+
+官網：https://sites.google.com/view/zayu-nekoneko-bot/%E9%A6%96%E9%A0%81
+
+隱私權政策：https://sites.google.com/view/zayu-nekoneko-bot/%E9%9A%B1%E7%A7%81%E6%AC%8A%E6%94%BF%E7%AD%96
+
+服務&開源條款：https://sites.google.com/view/zayu-nekoneko-bot/%E6%9C%8D%E5%8B%99%E9%96%8B%E6%BA%90%E6%A2%9D%E6%AC%BE
+
+更新日誌：https://github.com/milk120106/zayu-nekoneko-bot/releases
+
+功能申請 & BUG反饋：https://github.com/milk120106/zayu-nekoneko-bot/issues
+
+注意事項：本機器人經常且不定期的更新，很多功能加入後會不能使用、有bug或在多次更新中被刪除/註釋
+
+---
+
 (開發者ps：我很久才會更新一次倉庫)
