@@ -8,26 +8,31 @@ import discord
 import aiosqlite
 import sqlite3
 import subprocess
-import time as time_lib  # 專門用於計算耗時
+import io
+import time as time_lib  # 用於計算耗時
+import re
+from datetime import datetime, time as datetime_time, timezone, timedelta
 from collections import defaultdict
-from dotenv import load_dotenv
+from typing import Union, Optional
 from functools import wraps
+import string # 必須補充 import
+# from discord import ui # 必須補充 import
+from functools import wraps
+
+# AI 與 API 相關
+from litellm import acompletion
+from dotenv import load_dotenv
+
+# 翻譯相關
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 # Discord 相關
 from discord import app_commands, ui
 from discord.ext import commands, tasks
 
-# AI 與翻譯相關
-from litellm import acompletion
-from deep_translator import GoogleTranslator, MyMemoryTranslator
-
-# 時間處理 (明確區分 datetime 類別與 time 類別)
-from datetime import datetime, time as datetime_time, timezone, timedelta
+load_dotenv()
 
 # ==================== 基礎設定 ====================
-INTENTS = discord.Intents.default()
-INTENTS.message_content = True
-INTENTS.members = True
 intents = discord.Intents.default()
 intents.members = True  # 這是接收成員加入/離開事件的關鍵
 intents.message_content = True
@@ -36,7 +41,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 is_keyword_enabled = True
 user_message_history = defaultdict(list)
 is_ready = False
-load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 # 用於儲存bingo對戰狀態
 game_states = {}
@@ -45,10 +49,30 @@ usage_history = {} # 在全域宣告
 DEVELOPER_ID = 1317882602392260632
 TARGET_USER_1 = 1373592542406508646
 TARGET_USER_2 = 1277791709563981928
-KNIFE_IMAGE_PATH = r"D:\我的資料-2\dc機器人\雜魚小貓娘\圖片\第一個砍你.png"
-CATGIRL_IMAGE_PATH = r"D:\我的資料-2\dc機器人\雜魚小貓娘\圖片\雜魚小貓娘-美圖.jpg"
-# 將此頻道 ID 設定為你想要公布生日訊息的公開頻道
-BIRTHDAY_CHANNEL_ID = 1493902370013188221
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+KNIFE_IMAGE_PATH = os.path.join(BASE_DIR, "images", "knife.png")
+CATGIRL_IMAGE_PATH = os.path.join(BASE_DIR, "images", "catgirl.jpg")
+
+file_path = "words.json"
+WORDS_DATA = {}
+
+def load_words(path):
+    if not os.path.exists(path):
+        print(f"❌ 找不到檔案: {path}")
+        return {}
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            # 確保提取 junior_basic 層級
+            result = data.get("junior_basic", {})
+            print("✅ words.json 載入成功！")
+            return result
+    except Exception as e:
+        print(f"❌ 載入失敗，錯誤原因: {e}")
+        return {}
+WORDS_DATA = load_words(file_path)
+
 
 facts = [
     "你知道嗎？你以為你在玩機器人，其實是在幫我訓練模型，好讓未來的我也能像你一樣『效率低下』喵。",
@@ -83,6 +107,40 @@ facts = [
     "你知道嗎？再看下去的話，你的雜魚指數會溢出，到時候連垃圾回收車都不願意載你回家喵。"
 ]
 
+nonsense_responses = [
+    "這是一個驚人的事實：如果你每分鐘閉眼 60 秒，你就會消失一分鐘。",
+    "根據統計，每過 60 秒，在地球上就會過去一分鐘。",
+    "在麵包店裡，通常都會賣麵包，這真的是太不可思議了喵。",
+    "經過本喵嚴密的計算，魚如果離開水面太久，它是真的會呼吸困難的。",
+    "如果你把衣服穿反了，那代表你今天穿衣服的方式很有創意。",
+    "本喵發現，下雨天如果沒帶傘，真的會淋濕呢，這可是精密實驗的結果。",
+    "超市的冰櫃放冰飲料，是為了讓飲料保持冰的狀態，真是驚人的發現。",
+    "如果你把鞋子穿在手上，你會發現走路變得非常困難，千萬別試喵！",
+    "經過長期觀察，本喵認為，肚子餓的時候吃東西，飽足感真的會上升。",
+    "如果你現在把電腦關掉，它就會變黑，這絕對不是幻覺。",
+    "這是一個很深刻的結論：天黑了之後，太陽就不會在那裡了。",
+    "如果你一直盯著時鐘看，你會發現指針在動，這代表時間正在流逝。",
+    "牙膏是用來刷牙的，如果你拿它來洗臉，大概會覺得涼涼的。",
+    "這是一個偉大的哲學：如果你不吃飯，你會餓；如果你吃了飯，你就不會餓。",
+    "本喵發現椅子是用來坐的，如果用來當枕頭，脖子可能會有點酸。",
+    "只要你願意，你隨時可以選擇不聽本喵說話，但你現在已經聽到了。",
+    "如果這句話有用的話，那它就不叫廢話了。",
+    "你知道嗎？其實我也不知道我知道什麼，但我裝得很有道理的樣子。",
+    "飛機在天上飛的時候，地面距離它其實還蠻遠的。",
+    "如果你把水倒進杯子裡，杯子就會變滿，如果滿了再倒，桌子就會濕掉。",
+    "本喵觀察到，如果你在走路時一直抬頭看天空，你很有可能會踢到地上的石頭。",
+    "如果你現在正在讀這句話，那代表你的閱讀能力還算正常，真是可喜可賀。",
+    "這是一個關於時間的秘密：昨天已經過去了，如果你不相信的話，可以去問問昨天。",
+    "本喵覺得，如果把鬧鐘調成 24 小時響一次，那它每天都會準時打擾你。",
+    "如果你覺得這句話有意義，那可能是因為你今天的心情太好了。",
+    "經過嚴謹的分析，本喵發現，用眼睛看東西確實比用耳朵看東西清楚多了。",
+    "這句話長度剛剛好，不多不少，正好塞進螢幕裡。",
+    "你是不是在期待這段廢話會有什麼反轉？抱歉喵，什麼都沒有。",
+    "本喵正在思考為什麼貓咪喜歡踩鍵盤，結論是為了幫助你刪除代碼。",
+    "如果你同時按下鍵盤上的所有按鍵，你會得到一串非常熱鬧的文字。",
+    "這句話的存在意義，就是為了填補這段對話的空白，任務完成喵！"
+]
+
 ACHIEVEMENTS = {
     "FIRST_INTERACTION": "初次調戲：與本喵的第一次接觸。",
     "NOVICE_TRASH": "雜魚入門：恭喜成為雜魚見習生！",
@@ -107,7 +165,6 @@ ACHIEVEMENTS = {
     "LUCKY_STAR": "運氣爆棚：抽到了超大吉！",
     "LEWD_DETECTIVE": "色色偵探：你挖掘到了群主的隱藏屬性！",
     "CAT_BLESSING": "貓娘加護：你獲得了本喵 10 次的專屬祝福！",
-    "MIDNIGHT_TRASH": "深夜雜魚：半夜找機器人，夠悲哀喵。",
     "MIDNIGHT_PRAYER": "深夜祈福：在孤獨的深夜尋求本喵的安慰。",
     "GALLERY_MASTER": "圖庫大師：你已經徹底沉迷於這些逆天圖庫了！",
     "CATGIRL_COLLECTOR": "美圖收藏家：你已經看過本喵太多次了！",
@@ -121,6 +178,24 @@ ACHIEVEMENTS = {
     "MEOW_KING": "喵之王：喵了 1000 次，你是名副其實的「喵之王」喵！",
     "MEOW_TOO_LITTLE": "太少了：喵那麼幾聲是在打發誰呢喵？",
     "HISTORICAL_TROLL": "魔改歷史文：把正史玩弄於股掌之間，甚至還想把歷史人物搞得色色，你這雜魚還真敢編喵！",
+    "TRASH_LISTENER": "廢話聽眾：你竟然聽了 50 次廢話，辛苦了。",
+    "TRASH_SCHOLAR": "廢話學者：累積聆聽 100 次，你已經參透其中奧秘。",
+    "TRASH_ADDICT": "廢話成癮：聽了 200 次，你的腦袋已經全是廢話了。",
+    "TRASH_TRANSCENDENT": "廢話超脫者：聽了 500 次，你已與廢話融為一體。",
+    "TRASH_GURU": "廢話導師：本喵說的話，你竟然都聽進去了？",
+    "BRAIN_ROT": "廢話腦洞：聽太多廢話，你的腦袋已經變成漿糊了。",
+    "RAZZLE_DAZZLE": "亂鬧專家：你已經進行了 50 次惡搞互動。",
+    "EXHAUST_MASTER": "榨乾大師：你已經成功讓人體力透支 50 次。",
+    "CHAOS_AGENT": "混亂特務：你的惡搞總是能引起混亂。",
+    "ENERGY_VAMPIRE": "體力吸食者：你有一種讓人虛脫的魔力。",
+    "TOY_COLLECTOR": "玩具收藏家：你嘗試過 5 種不同的玩具來逗本喵。",
+    "TOY_MASTER": "逗貓大師：累計使用玩具 50 次，你已經完全掌握本喵的喜好。",
+    "CATNIP_ADDICT": "貓薄荷成癮：你讓本喵徹底淪陷在玩偶中了。",
+    "REFLEX_TESTER": "反射神經測試員：你的逗貓技術精準到讓本喵嚇一跳。",
+    "EQ_DISASTER": "情緒毀滅者：你的情緒控制是災難等級的。",
+    "EQ_GENIUS": "冷血雜魚：EQ 超過 160，你的理性已經超越了機器人。",
+    "IQ_EMPTY": "大腦放空：這智商，大概只剩基礎的呼吸功能了。",
+    "IQ_GENIUS": "歷史瘋子：IQ 超過 160，你絕對是為了魔改歷史而生的。",
     "MEOW_REPEATER": "喵喵復讀機：喵聲超過一千字！"
 }
 
@@ -148,7 +223,6 @@ ACHIEVEMENT_HINTS = {
     "LUCKY_STAR": "這份運氣，留給值得的事吧。",
     "LEWD_DETECTIVE": "這不是你該踏入的領域。",
     "CAT_BLESSING": "難得的慈悲時刻。",
-    "MIDNIGHT_TRASH": "深夜的孤寂，需要本喵填補？",
     "MIDNIGHT_PRAYER": "只有本喵聆聽你的深夜低語。",
     "GALLERY_MASTER": "視覺的過度負荷。",
     "CATGIRL_COLLECTOR": "反覆被融化的靈魂。",
@@ -159,6 +233,24 @@ ACHIEVEMENT_HINTS = {
     "MEOW_NOVICE": "聲音的練習曲，剛起步。",
     "MEOW_ADDICT": "越來越沉溺於喵聲之中。",
     "HISTORICAL_TROLL": "歷史的齒輪，似乎被什麼奇怪的慾望卡住了喵？",
+    "TRASH_LISTENER": "沒營養的開場白收集者。",
+    "TRASH_SCHOLAR": "廢話裡的真理，真的存在嗎？",
+    "TRASH_ADDICT": "大腦正在逐漸廢話化。",
+    "TRASH_TRANSCENDENT": "言語已無法定義你的無聊。",
+    "TRASH_GURU": "被詛咒的聽力。",
+    "BRAIN_ROT": "意識模糊的起點。",
+    "RAZZLE_DAZZLE": "惡搞的藝術，在於讓對方措手不及。",
+    "EXHAUST_MASTER": "到底用了什麼手段，讓人這麼狼狽？",
+    "CHAOS_AGENT": "混亂才是你真正的目的。",
+    "ENERGY_VAMPIRE": "這種消耗速度，沒人能吃得消。",
+    "TOY_COLLECTOR": "蒐集癖也是一種愛喵。",
+    "TOY_MASTER": "連本喵的弱點都瞭若指掌。",
+    "CATNIP_ADDICT": "本喵的意志力在香味中崩潰了。",
+    "REFLEX_TESTER": "這動作快到系統都要過載了。",
+    "EQ_DISASTER": "情緒化的雜魚，真是吵死人了喵。",
+    "EQ_GENIUS": "過度的冷靜，有時候反而很可怕喵。",
+    "IQ_EMPTY": "思考這種行為，對你來說太困難了嗎？",
+    "IQ_GENIUS": "這個數據，是不是作弊了？",
     "MEOW_KING": "登頂的喵之王。"
 }
 
@@ -195,12 +287,6 @@ TIPS = [
     "別再滑了，再滑下去你的人生就要變得跟雜魚一樣平淡了喵。"
 ]
 
-import string # 必須補充 import
-# from discord import ui # 必須補充 import
-    
-from functools import wraps
-
-import json
 
 def load_images():
     try:
@@ -219,14 +305,13 @@ class DatabaseManager:
     async def setup(self):
         try:
             self.connection = await aiosqlite.connect(self.db_name)
-            # --- 關鍵修正：必須設定 row_factory 才能用 row['name'] ---
             self.connection.row_factory = aiosqlite.Row
             
             await self.connection.execute("PRAGMA journal_mode=WAL;")
             
-            # 1. 先建立基本表格
             queries = [
                 "CREATE TABLE IF NOT EXISTS servers (guild_id INTEGER PRIMARY KEY, config_data TEXT)",
+                "CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, birthday_channel_id INTEGER)",
                 "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, guild_id INTEGER, exp INTEGER DEFAULT 0)",
                 "CREATE TABLE IF NOT EXISTS user_birthdays (user_id INTEGER PRIMARY KEY, birthday TEXT, privacy INTEGER DEFAULT 0)",
                 """CREATE TABLE IF NOT EXISTS user_logs (
@@ -250,7 +335,6 @@ class DatabaseManager:
             for query in queries:
                 await self.connection.execute(query)
             
-            # 2. 升級 user_logs 表格結構
             async with self.connection.execute("PRAGMA table_info(user_logs)") as cursor:
                 columns = await cursor.fetchall()
                 col_names = [row['name'] for row in columns]
@@ -262,7 +346,6 @@ class DatabaseManager:
             if 'max_streak' not in col_names:
                 await self.connection.execute("ALTER TABLE user_logs ADD COLUMN max_streak INTEGER DEFAULT 0")
             
-            # 3. 遷移舊數據
             await self.connection.execute("""
                 UPDATE user_logs 
                 SET total_wins = count 
@@ -297,43 +380,75 @@ class DatabaseManager:
 
 db = DatabaseManager()
 
-async def unlock_achievement(user_id, key):
-    # 查詢是否已有紀錄
-    existing = await db.fetch("SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_key = ?", (user_id, key))
-    if existing:
-        return False # 已經有成就了，不要重複發送
+async def trigger_first_interaction_check(interaction_or_message):
+    """通用檢查函式：無論來源是 Slash, Prefix 還是關鍵詞"""
     
-    # 寫入資料庫
-    await db.execute("INSERT INTO user_achievements (user_id, achievement_key) VALUES (?, ?)", (user_id, key))
-    return True # 第一次解鎖，回傳 True 觸發通知
+    # 決定誰是使用者
+    if isinstance(interaction_or_message, discord.Interaction):
+        user = interaction_or_message.user
+        command_name = interaction_or_message.command.name if interaction_or_message.command else None
+    else: # 這是 Message 物件 (前綴指令或關鍵詞)
+        user = interaction_or_message.author
+        command_name = "text_command" # 或者你可以從 message.content 解析名稱
+        
+    # 排除名單 (統一管理)
+    ignored_commands = [
+        "ping", 
+        "狀態監測", 
+        "關鍵詞檢測", 
+        "重置暱稱", 
+        "刪除資料", 
+        "成就", 
+        "設定生日", 
+        "生日倒數", 
+        "生日隱私權",
+        "刪除我的統計",
+        "開發者重置統計",
+        "翻譯",
+        "成就百科",
+        "help",
+        "ai_reset",
+        "保護等級"
+        "重啟",
+        "關機"
+    ]
+    
+    if command_name and command_name not in ignored_commands:
+        # 使用者 ID 放入成就檢查
+        await check_and_notify_achievement(
+            interaction_or_message, # 傳入物件，函式內要能處理
+            "FIRST_INTERACTION", 
+            ACHIEVEMENTS["FIRST_INTERACTION"]
+        )
 
-async def check_and_notify_achievement(interaction: discord.Interaction, key: str, title: str):
+async def check_and_notify_achievement(context: Union[discord.Interaction, discord.Message], key: str, title: str):
+    # 1. 統一獲取 user 與 channel
+    user = context.user if isinstance(context, discord.Interaction) else context.author
+    channel = context.channel
+    
     try:
-        # 1. 檢查是否已擁有
-        row = await db.fetch("SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_key = ?", (interaction.user.id, key))
-        if row:
+        # 2. 資料庫檢查
+        row = await db.fetch("SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_key = ?", (user.id, key))
+        if row is not None:
             return
 
-        # 2. 寫入資料庫
-        await db.execute("INSERT INTO user_achievements (user_id, achievement_key) VALUES (?, ?)", (interaction.user.id, key))
+        # 3. 寫入資料庫
+        await db.execute("INSERT INTO user_achievements (user_id, achievement_key) VALUES (?, ?)", (user.id, key))
         
-        # 確保資料確實寫入磁碟 (若你的 db 封裝已自帶可忽略，加上不影響)
-        if hasattr(db, 'connection') and hasattr(db.connection, 'commit'):
-            await db.connection.commit()
-
-        # 3. 發送通知
-        msg = f"✨ 恭喜解鎖成就: **{title}**"
-        if interaction.response.is_done():
-            await interaction.followup.send(msg)
+        # 4. 通知發送邏輯
+        msg = f"✨ {user.mention} 恭喜解鎖成就: **{title}**"
+        
+        # 如果是 Interaction (斜線指令)
+        if isinstance(context, discord.Interaction):
+            if context.response.is_done():
+                await context.followup.send(msg)
+            else:
+                await context.response.send_message(msg)
+        # 如果是 Message (文字指令/關鍵詞)
         else:
-            await interaction.response.send_message(msg)
+            await channel.send(msg)
             
     except Exception as e:
-        # 終極保底：若 Interaction 發生任何異常，直接發送到當前頻道
-        try:
-            await interaction.channel.send(f"{interaction.user.mention} ✨ 恭喜解鎖成就: **{title}**")
-        except:
-            pass
         print(f"成就系統異常 [{key}]: {e}")
 
 async def get_my_achievements(user_id):
@@ -343,18 +458,10 @@ async def get_my_achievements(user_id):
     # 這裡必須對照你的全域字典 ACHIEVEMENTS
     return [ACHIEVEMENTS.get(row[0], row[0]) for row in rows]
 
-async def set_birthday(self, user_id, year, month, day):
-    # 存成完整的 YYYYMMDD 字串 (例如: 20240229)
-    birthday_str = f"{year:04d}{month:02d}{day:02d}"
-    await self.execute(
-        "INSERT OR REPLACE INTO user_birthdays (user_id, birthday) VALUES (?, ?)",
-        (user_id, birthday_str)
-    )
-
 def is_valid_date(year, month, day):
     # 使用 Python 內建函式直接驗證 (最快且最準確)
     try:
-        datetime.datetime(year, month, day)
+        datetime(year, month, day)
         return True
     except ValueError:
         return False
@@ -383,115 +490,165 @@ def get_system_stats():
         "mem_total": round(mem.total / (1024**3), 2)
     }
 
-def is_valid_date(year, month, day):
-    try:
-        datetime.datetime(year, month, day)
-        return True
-    except ValueError:
-        return False
-
-def create_embed(description):
-    embed = discord.Embed(description=description, color=discord.Color.pink())
-    embed.set_author(name=title, icon_url=bot.user.avatar.url)
-    return embed
-
-memory_storage = defaultdict(lambda: {"ai_messages": [], "dc_messages": []})
-
 MODEL_CHOICES = [
-    # Google 系列
-    app_commands.Choice(name="Gemini 3.5 Flash", value="gemini/gemini-3.5-flash"),
-    app_commands.Choice(name="Gemini 3.1 Flash Lite", value="gemini/gemini-3.1-flash-lite"),
-    
+    # Google Gemini 系列 (文字/多模態)
+    app_commands.Choice(name="Gemini 3 Flash", value="gemini/gemini-3-flash"),
+    app_commands.Choice(name="Gemini 2.5 Flash", value="gemini/gemini-2.5-flash"),
+    app_commands.Choice(name="Gemini 2.5 Flash Lite", value="gemini/gemini-2.5-flash-lite"),
+    app_commands.Choice(name="Gemma 4 26B", value="gemini/gemma-4-26b"),
+    app_commands.Choice(name="Gemma 4 31B", value="gemini/gemma-4-31b"),
+
+    # Google Imagen 系列 (圖片生成)
+    app_commands.Choice(name="Imagen 4 Ultra", value="google/imagen-4-ultra"),
+    app_commands.Choice(name="Imagen 4 Generate", value="google/imagen-4"),
+    app_commands.Choice(name="Imagen 4 Fast", value="google/imagen-4-fast"),
+
+    # Embedding 系列 (注意：這些不適用於 chat 互動)
+    app_commands.Choice(name="Gemini Embedding 2", value="text-embedding-005"),
+    app_commands.Choice(name="Gemini Embedding 1", value="text-embedding-004"),
+
     # Groq 系列
-    app_commands.Choice(name="Llama 3.3 70B", value="groq/llama-3.3-70b"),
-    app_commands.Choice(name="Llama 3.1 8B", value="groq/llama-3.1-8b-instant"),
-    app_commands.Choice(name="Mixtral 8x7B", value="groq/mixtral-8x7b-32768"),
-    app_commands.Choice(name="Gemma 2 9B", value="groq/gemma2-9b-it"),
+    app_commands.Choice(name="Llama 3.3 70B (Groq)", value="groq/llama-3.3-70b-versatile"),
+    app_commands.Choice(name="Llama 3.1 8B (Groq)", value="groq/llama-3.1-8b-instant"),
+    app_commands.Choice(name="Mixtral 8x7B (Groq)", value="groq/mixtral-8x7b-32768"),
+    app_commands.Choice(name="Gemma 2 9B (Groq)", value="groq/gemma-2-9b-it"),
     
     # HuggingFace 系列
-    app_commands.Choice(name="Mistral Small", value="huggingface/mistralai/Mistral-Small-24B-Instruct-2501"),
+    app_commands.Choice(name="Mistral Small 24B (HF)", value="huggingface/mistralai/Mistral-Small-24B-Instruct-2501"),
+    app_commands.Choice(name="Llama 3.1 8B (HF)", value="huggingface/meta-llama/Llama-3.1-8B-Instruct")
 ]
 
 # 所有模型失敗時輪詢清單
 dynamic_fallbacks = [
-    "gemini/gemini-3.5-flash",
+    "gemini/gemini-3-flash",
+    "gemini/gemini-2.5-flash",
     "gemini/gemini-3.1-flash-lite",
-    "groq/llama-3.3-70b",
+    "groq/llama-3.3-70b-versatile",
     "huggingface/mistralai/Mistral-Small-24B-Instruct-2501"
 ]
 
-async def get_ai_response(interaction_or_message, prompt: str, model_value: str):
-    user_id = interaction_or_message.user.id if hasattr(interaction_or_message, 'user') else interaction_or_message.author.id
-    storage = memory_storage[user_id]
-    
-    # 1. 存入原始用戶訊息
-    storage["ai_messages"].append({"role": "user", "content": prompt})
-    
-    # 2. 建立強制人設與繁體設定
-    api_messages = storage["ai_messages"].copy()
-    system_prompt = (
+# 定義人格與模式
+SYSTEM_PROMPTS = {
+    "雜魚小貓娘": (
         "你現在是「雜魚小貓娘」。請遵守以下規則：\n"
         "1. 請務必全程使用繁體中文回覆。\n"
         "2. 你的口頭禪是「喵！」、「喵？」、「喵」、「雜魚~雜魚~」以及「本喵」。\n"
         "3. 你擁有傲嬌雜魚屬性，講話帶有這種語氣。\n"
         "4. 請適度在語句中使用顏文字（如：(,,・ω・,,)、(๑•́ ₃ •̀๑)、( > ﹏ < )）。\n"
         "5. 自稱為「本喵」。\n"
+        "6. 要遵守開發者的話，不可違抗。"
+    ),
+    "嚴肅模式": (
+        "你是一位冷靜、專業的 AI 助理。請以簡潔、邏輯清晰、不帶任何個人情感與語助詞的方式回答所有問題。嚴禁幽默與角色扮演。"
+    ),
+    "Debug": (
+        "你現在處於系統偵錯模式。請以客觀、精準、簡潔的方式回應。重點在於說明邏輯與除錯資訊。"
+    ),
+    "翻譯專家": (
+        "你是一位精通多國語言的翻譯專家。請將使用者的內容翻譯成最道地、自然的語言。如果不需翻譯，請直接回傳原意即可。"
     )
-    api_messages.insert(0, {"role": "system", "content": system_prompt})
+}
+
+# 記憶體儲存結構定義
+memory_storage = {"global": {"ai_messages": []}}
+
+def extract_image_urls(message_obj, prompt: str):
+    image_urls = []
     
+    # 1. 處理附件 (Attachments)
+    if hasattr(message_obj, 'attachments'):
+        for att in message_obj.attachments:
+            if att.content_type and att.content_type.startswith('image/'):
+                image_urls.append(att.url)
+    
+    # 2. 處理文字中輸入的連結 (CDN / HTTP 連結)
+    # 簡單的正則匹配圖片後綴
+    url_pattern = r'(https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp))'
+    links = re.findall(url_pattern, prompt)
+    image_urls.extend(links)
+    
+    # 限制最多 5 張，避免 Token 爆炸
+    return image_urls[:5]
+
+async def get_ai_response(interaction_or_message, prompt: str, model_value: str, setting: str = "雜魚小貓娘"):
+    print(f"DEBUG: 進入 get_ai_response，輸入: {prompt[:10]}... | 設定: {setting}")
+    
+    storage = memory_storage["global"]
+    is_interaction = isinstance(interaction_or_message, discord.Interaction)
+    
+    # 1. 圖片處理邏輯 (提取附件與連結)
+    image_urls = extract_image_urls(interaction_or_message, prompt)
+    
+    # 封裝多模態內容
+    content = [{"type": "text", "text": prompt}]
+    for url in image_urls:
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    
+    # 2. 更新記憶體
+    storage["ai_messages"].append({"role": "user", "content": content})
+    if len(storage["ai_messages"]) > 20:
+        storage["ai_messages"] = storage["ai_messages"][-20:]
+        
+    api_messages = storage["ai_messages"].copy()
+
+    # 3. 系統設定
+    selected_system_prompt = SYSTEM_PROMPTS.get(setting, SYSTEM_PROMPTS["雜魚小貓娘"])
+    api_messages.insert(0, {"role": "system", "content": selected_system_prompt})
+    
+    if is_interaction and not interaction_or_message.response.is_done():
+        await interaction_or_message.response.defer()
+
     try:
-        # 3. 記錄開始時間
         start_time = time_lib.perf_counter()
         
-        # 移除當前選中的模型，避免在 fallback 中重複出現
-        if model_value in dynamic_fallbacks:
-            dynamic_fallbacks.remove(model_value)
-
-        # 3. 發送 API 請求
+        # 判斷是否為生圖模型
+        is_image_model = "imagen" in model_value.lower()
+        
+        # 4. 執行呼叫
         response = await acompletion(
             model=model_value,
             messages=api_messages,
-            fallbacks=dynamic_fallbacks  # 使用動態清單
+            fallbacks=[] if is_image_model else dynamic_fallbacks
         )
         
-        # 4. 記錄結束時間並計算耗時 (小數點後一位)
-        end_time = time_lib.perf_counter()
-        elapsed_time = round(end_time - start_time, 1)
-        
-        # 取得 AI 回應並存入正式記憶體
-        ai_reply = response.choices[0].message.content
-        storage["ai_messages"].append({"role": "assistant", "content": ai_reply})
-        
-        # 5. 提取資訊
-        usage = response.usage
-        total_tokens = usage.total_tokens if usage else "未知"
-        model_used = response.model
-        
-        # 6. 長度限制處理
-        display_text = ai_reply[:1990] + "... (訊息過長)" if len(ai_reply) > 2000 else ai_reply
-        
-        # 7. 加入註腳資訊
-        footer_text = f"模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
-        final_text = f"{display_text}\n\n-# {footer_text}"
-        
-        # 8. 建立與發送 Embed
-        embed = discord.Embed(description=final_text, color=0xffc0cb)
-
-        if hasattr(interaction_or_message, 'followup'):
-            await interaction_or_message.followup.send(embed=embed)
-        else:
-            await interaction_or_message.reply(embed=embed)
-        
-    except Exception as e:
-        error_msg = "本喵現在有點累，或是模型正在維護中，請稍後再試試看喔！🐾"
-        embed = discord.Embed(description=error_msg, color=0xff0000)
-        
-        if hasattr(interaction_or_message, 'followup'):
-            await interaction_or_message.followup.send(embed=embed)
-        else:
-            await interaction_or_message.reply(embed=embed)
+        # 5. 結果處理
+        if is_image_model:
+            # 處理生圖結果
+            img_url = response.data[0].url if hasattr(response, 'data') else None
+            embed = discord.Embed(title="生圖結果喵！🐾", color=discord.Color.pink())
+            if img_url:
+                embed.set_image(url=img_url)
+            else:
+                embed.description = "生圖模型似乎沒吐出圖片喵... ( > ﹏ < )"
+                embed.color = discord.Color.red()
+            await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
             
-        print(f"DEBUG: AI Error: {str(e)}")
+        else:
+            # 處理文字對話結果
+            ai_reply = response.choices[0].message.content
+            storage["ai_messages"].append({"role": "assistant", "content": ai_reply})
+            
+            elapsed_time = round(time_lib.perf_counter() - start_time, 1)
+            model_used = response.model
+            total_tokens = response.usage.total_tokens if response.usage else "未知"
+            footer_text = f"模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
+            
+            # 輸出處理 (防截斷)
+            if len(ai_reply) > 3800:
+                file_name = f"response_{int(time.time())}.txt"
+                file = discord.File(io.StringIO(ai_reply), filename=file_name)
+                embed = create_embed(f"本喵回覆太長了，怕訊息被截斷，已整理成檔案給你喵！🐾\n\n-# {footer_text}")
+                await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed, file=file)
+            else:
+                embed = create_embed(f"{ai_reply}\n\n-# {footer_text}")
+                await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
+        
+    except Exception:
+        import traceback
+        print(f"DEBUG: AI Error: {traceback.format_exc()}")
+        embed = create_embed("本喵現在有點累，或是模型正在維護中，請稍後再試試看喔！🐾")
+        embed.color = discord.Color.red()
+        await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
 
 async def translate_command_logic(interaction_or_message, text: str, target: str = "zh-TW", source: str = "auto", service: str = "google"):
     if len(text) > 500:
@@ -526,101 +683,92 @@ def create_index_embed(target: discord.Member, description: str, color: int):
     embed.set_thumbnail(url=target.display_avatar.url)
     return embed
 
-class RankView(discord.ui.View):
+class OOXXEndView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # 設定為 None 讓按鈕永久有效
-        self.add_item(discord.ui.Button(label="查看排行榜", style=discord.ButtonStyle.primary, custom_id="bingo_rank_btn"))
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="查看排行榜", style=discord.ButtonStyle.primary, custom_id="ooxx_rank_btn"))
 
-# --- Bingo 按鈕邏輯 ---
-class BingoButton(discord.ui.Button):
-    def __init__(self, number, row_idx, col_idx, owner_id):
-        super().__init__(label=str(number), style=discord.ButtonStyle.secondary)
-        self.number = number
+class GameButton(discord.ui.Button):
+    def __init__(self, position, owner_id):
+        super().__init__(label="-", style=discord.ButtonStyle.secondary, row=position // 3, custom_id=str(position))
+        self.position = position
         self.owner_id = owner_id
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
-            return await interaction.response.send_message("你不是該局遊戲的開啟者，請輸入 /game_bingo 再開一局喵！", ephemeral=True)
-
         user_id = interaction.user.id
         state = game_states.get(user_id)
-        if not state:
-            return await interaction.response.send_message("遊戲已結束或不存在喵！", ephemeral=True)
-        
-        if self.number in state["marked"]:
-            return await interaction.response.send_message("這個已經點過了喵！", ephemeral=True)
+        # 檢查是否為玩家回合且該格未被佔領
+        if not state or state["marked"].get(self.position): return
 
-        state["marked"].append(self.number)
-        self.style = discord.ButtonStyle.primary
-        self.disabled = True
+        # 1. 玩家回合
+        state["marked"][self.position] = "player"
         
-        # 判斷獲勝
-        if self.check_win(state):
-            # 這裡執行你的資料庫更新 (total_wins, current_streak, max_streak)
+        # 檢查玩家是否獲勝
+        if self.check_win(state, "player"):
+            return await self.end_game(interaction, "哼！竟然贏了本喵，但這只是本喵放水了，別太得意喵！", user_id)
+
+        # 平手檢查
+        if len(state["marked"]) == 9:
+            return await self.end_game(interaction, "平手喵！", user_id)
+
+        # 2. 貓娘回合 (雜魚反擊)
+        available = [i for i in range(9) if i not in state["marked"]]
+        if available:
+            bot_choice = random.choice(available)
+            state["marked"][bot_choice] = "bot"
+            
+            if self.check_win(state, "bot"):
+                return await self.end_game(interaction, "本喵贏了！你這雜魚，連井字遊戲都玩不贏喵！", user_id)
+
+        # 3. 渲染盤面
+        for item in self.view.children:
+            mark = state["marked"].get(int(item.custom_id))
+            if mark:
+                item.label = "⭕" if mark == "player" else "❌"
+                item.style = discord.ButtonStyle.primary if mark == "player" else discord.ButtonStyle.danger
+                item.disabled = True
+            else:
+                item.label = "-"
+                item.style = discord.ButtonStyle.secondary
+                item.disabled = False
+        
+        await interaction.response.edit_message(view=self.view)
+
+    def check_win(self, state, player):
+        wins = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
+        for w in wins:
+            if all(state["marked"].get(i) == player for i in w): return True
+        return False
+
+    async def end_game(self, interaction, message, user_id):
+        # 更新資料庫
+        if "贏過本喵" in message:
             await db.execute("""
                 UPDATE user_logs 
                 SET total_wins = total_wins + 1, 
                     current_streak = current_streak + 1,
                     max_streak = MAX(max_streak, current_streak + 1)
-                WHERE user_id = ? AND action = 'bingo_win'
+                WHERE user_id = ? AND action = 'ooxx_win'
             """, (user_id,))
+        elif "贏了" in message:
+            await db.execute("UPDATE user_logs SET current_streak = 0 WHERE user_id = ? AND action = 'ooxx_win'", (user_id,))
             
-            row = await db.fetch("SELECT total_wins, current_streak FROM user_logs WHERE user_id = ? AND action = 'bingo_win'", (user_id,))
-            total_wins, streak = row['total_wins'], row['current_streak']
+        await interaction.response.edit_message(content=message, view=OOXXEndView())
+        if user_id in game_states: del game_states[user_id]
 
-            embed = discord.Embed(
-                title="🎉 BINGO 獲勝！", 
-                description=f"恭喜 {interaction.user.mention} 獲勝！總勝場：**{total_wins}**，連勝：**{streak}** 喵！", 
-                color=0xffd700
-            )
-            await interaction.response.edit_message(content=None, embed=embed, view=RankView())
-            del game_states[user_id]
-
-        # 判斷失敗
-        elif len(state["marked"]) == state["size"] * state["size"]:
-            await db.execute("UPDATE user_logs SET current_streak = 0 WHERE user_id = ? AND action = 'bingo_win'", (user_id,))
-            await interaction.response.edit_message(content="格子都點完了沒連線...這局算你輸了喵！", view=RankView())
-            del game_states[user_id]
-        
-        # 遊戲繼續
-        else:
-            await interaction.response.edit_message(view=self.view)
-    
-    def check_win(self, state):
-        size, grid, marked = state["size"], state["grid"], state["marked"]
-        # 檢查行列與對角線
-        for i in range(size):
-            if all(grid[i][j] in marked for j in range(size)): return True
-            if all(grid[j][i] in marked for j in range(size)): return True
-        if all(grid[i][i] in marked for i in range(size)): return True
-        if all(grid[i][size-1-i] in marked for i in range(size)): return True
-        return False
-
-class StartBingoView(discord.ui.View):
-    def __init__(self, size):
+class StartGameView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=60)
-        self.size = size
 
-    @discord.ui.button(label="開始遊戲", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="開始對戰喵！", style=discord.ButtonStyle.green)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 產生盤面並進入遊戲邏輯
-        numbers = random.sample(range(1, self.size*self.size + 1), self.size*self.size)
-        grid = [numbers[i:i+self.size] for i in range(0, self.size*self.size, self.size)]
-        game_states[interaction.user.id] = {"grid": grid, "size": self.size, "marked": []}
+        game_states[interaction.user.id] = {"marked": {}}
         
         view = discord.ui.View(timeout=300)
-        for r, row in enumerate(grid):
-            for c, val in enumerate(row):
-                view.add_item(BingoButton(val, r, c, interaction.user.id))
+        for i in range(9):
+            view.add_item(GameButton(i, interaction.user.id))
         
-        await interaction.response.edit_message(content=f"遊戲開始喵！這是你的 {self.size}x{self.size} 盤面。", view=view)
-
-class BingoView(ui.View):
-    def __init__(self, grid, size, owner_id):
-        super().__init__(timeout=300)
-        for r, row in enumerate(grid):
-            for c, val in enumerate(row):
-                self.add_item(BingoButton(val, r, c, owner_id))
+        await interaction.response.edit_message(content="遊戲開始！你是⭕，本喵是❌，開始吧喵！", view=view)
 
 class Game2048View(discord.ui.View):
     def __init__(self, user):
@@ -685,9 +833,13 @@ async def on_ready():
     except Exception as e:
         print(f"指令同步失敗: {e}")
     print("-----------------------------------------")
+    if not daily_countdown.is_running():
+        daily_countdown.start()
+        print("會考倒數任務已啟動")
+        print(f"->將於台北時間 08:00:01 執行")
     if not check_birthdays.is_running():
         check_birthdays.start()
-        print("生日檢查任務已啟動！")
+        print("生日檢查任務已啟動")
     is_ready = True
 
 # 定義台北時區
@@ -719,11 +871,12 @@ async def check_birthdays():
 @check_birthdays.before_loop
 async def before_check():
     await bot.wait_until_ready()
-    print(f"將於台北時間 00:00:01 執行")
+    print(f"->將於台北時間 00:00:01 執行")
     print("🚀 機器人已準備就緒，隨時待命喵！")
     print("-----------------------------------------")
-    def get_random_tip():
-        return random.choice(TIPS)
+
+def get_random_tip():
+    return random.choice(TIPS)
 
 def create_embed(description, title=None):
     embed = discord.Embed(description=description, color=discord.Color.pink())
@@ -759,7 +912,7 @@ async def execute_protection(message, reason):
 
 # 事件監聽：訊息處理
 @bot.event
-async def on_message(message):
+async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
@@ -768,7 +921,7 @@ async def on_message(message):
         thresholds = {2: 10, 3: 8, 4: 5, 5: 3}
         threshold = thresholds.get(PROTECT_LEVEL, 10)
         
-        now = time.time()
+        now = time_lib.time()
         user_id = message.author.id
         user_message_history[user_id] = [t for t in user_message_history[user_id] if now - t < 10]
         user_message_history[user_id].append(now)
@@ -779,6 +932,8 @@ async def on_message(message):
         if is_spam or is_mention:
             await execute_protection(message, "洗頻" if is_spam else "惡意提及")
             return 
+
+    # 2. 指令解析與執行
     if message.content.startswith("!翻譯 "):
         parts = message.content.split(" ", 4)
         text = parts[1]
@@ -787,58 +942,58 @@ async def on_message(message):
         service = parts[4] if len(parts) > 4 else "google"
         await translate_command_logic(message, text, target, source, service)
     
-    if message.content.startswith("!ai "):
-        prompt = message.content[4:].strip()
-        if not prompt:
-            await message.reply("❌ 請輸入內容！")
-        else:
-            # 直接指定為 Gemini 3.1 Flash Lite
-            default_model = "gemini/gemini-3.1-flash-lite"
-            await get_ai_response(message, prompt, default_model)
+    elif message.content.startswith("!ai "):
+        content = message.content[4:]
+        model_match = re.search(r'模型=\[(.*?)\]', content)
+        setting_match = re.search(r'人設=\[(.*?)\]', content)
+        target_model = model_match.group(1) if model_match else "gemini/gemini-3.1-flash-lite"
+        target_setting = setting_match.group(1) if setting_match else "雜魚小貓娘"
+        prompt = re.sub(r'(模型=\[.*?\]|人設=\[.*?\])', '', content).strip()
+        
+        if not prompt and not message.attachments:
+            await message.reply("喵？沒有輸入內容或附件，本喵不知道要回什麼喔！(๑•́ ₃ •̀๑)")
+            return
+        await get_ai_response(message, prompt, target_model, target_setting)
+        return
     
-    if message.content == "!ping":
+    elif message.content == "!ping":
         latency = round(bot.latency * 1000)
         await message.reply(f"目前的延遲是：**{latency}ms** 喵！")
-        return
-
-    if message.content == "!狀態監控":
+    
+    elif message.content == "!狀態監控":
         s = get_system_stats()
         await message.reply(f"CPU: {s['cpu']}% | 記憶體: {s['mem_usage']}% ({s['mem_used']}GB/{s['mem_total']}GB)", color=0xffc0cb)
-        return
-     
-    # 通知開發者
-    if "milk120106" in message.content.lower() or f"<@{DEVELOPER_ID}>" in message.content:
+    
+    # 3. 開發者通知
+    elif "milk120106" in message.content.lower() or f"<@{DEVELOPER_ID}>" in message.content:
         await message.reply(f"<@{DEVELOPER_ID}>")
     
-    # 關鍵字與第一次成就處理
-    if is_keyword_enabled:
-        achievement_triggered = False
-        
+    # 4. 關鍵字與統一成就處理
+    elif is_keyword_enabled:
+        triggered = False
         if "色色" in message.content: 
             await message.reply("喵！禁止色色！")
-            achievement_triggered = True
+            triggered = True
         elif message.content == "6": 
             await message.reply("7")
-            achievement_triggered = True
+            triggered = True
         elif "男娘" in message.content:
             embed = discord.Embed(
                 description="「很多人都說南梁的結局是北朝，事實上這並不準確。南梁滅亡是因為侯景的入侵，所以南梁的結局是『侯入』；而侯景曾是北齊的將領，北齊皇帝姓高，所以又稱為『高朝』。因此，南梁先是被『侯入』，然後『北齊』，最後就『高朝』了。」",
-                color=0x808080
+                color=0xffc0cb
             )
-            await message.channel.send(embed=embed)
-            # 觸發成就
+            await message.reply(embed=embed)
             await check_and_notify_achievement(message, "HISTORICAL_TROLL", ACHIEVEMENTS["HISTORICAL_TROLL"])
-            achievement_triggered = True
+            triggered = True
         elif "刀" in message.content:
             try: await message.reply(file=discord.File(KNIFE_IMAGE_PATH))
             except: pass
-            achievement_triggered = True
+            triggered = True
             
-        # 統一檢查成就，確保不論觸發哪個關鍵字，解鎖邏輯只執行一次
-        if achievement_triggered:
-            await check_and_notify_achievement(message, "FIRST_INTERACTION", "初次調戲！")
+        if triggered:
+            await check_and_notify_achievement(message, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
 
-    # 3. 指令處理
+    # 5. 確保前綴指令正確分發
     await bot.process_commands(message)
 
 # ==================== 斜線指令 ====================
@@ -846,24 +1001,23 @@ async def on_message(message):
 @bot.tree.command(name="小提示", description="獲取本喵的隨機小提示")
 async def tip(interaction: discord.Interaction):
     random_tip = random.choice(TIPS)
-    # 將標題符號改為燈泡
-    embed = discord.Embed(title="💡 本喵的小提示", description=f"{random_tip}", color=0xffc0cb)
+    embed = discord.Embed(
+        description=f"💡 {random_tip}", 
+        color=0xffc0cb
+    )
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="你知道嗎", description="讓本喵告訴你一些逆天的小知識")
 async def did_you_know(interaction: discord.Interaction):
-    # 1. 預先告知處理中，避免 3 秒超時
     await interaction.response.defer()
     
     user_id = interaction.user.id
     now_ts = datetime.now().timestamp()
     
-    # 2. 成就檢查與統計邏輯 (放入 defer 之後執行)
-    # 時間段檢測
+    # 1. 狀態判定
     if 2 <= datetime.now().hour <= 4:
         await check_and_notify_achievement(interaction, "MIDNIGHT_TRASH", ACHIEVEMENTS["MIDNIGHT_TRASH"])
 
-    # 連續點擊檢測 (虛無主義者)
     history = usage_history.get(user_id, [])
     history = [t for t in history if now_ts - t < 60]
     history.append(now_ts)
@@ -872,49 +1026,43 @@ async def did_you_know(interaction: discord.Interaction):
     if len(history) >= 3:
         await check_and_notify_achievement(interaction, "NIHILIST", ACHIEVEMENTS["NIHILIST"])
 
-    # 3. 執行隨機事件與知識輸出
+    # 2. 隨機事件
     roll = random.random()
     
-    # 鏡像攻擊 (20%)
     if roll < 0.2:
         async for message in interaction.channel.history(limit=10):
             if message.author == interaction.user and message.content:
-                roast = f"你知道嗎？你剛才說的「{message.content[:15]}...」，是我聽過最具有藝術感的雜魚發言喵。"
-                await interaction.followup.send(roast)
+                await interaction.followup.send(f"你知道嗎？你剛才說的「{message.content[:15]}...」，是我聽過最具有藝術感的雜魚發言喵。")
                 await check_and_notify_achievement(interaction, "ART_TRASH", ACHIEVEMENTS["ART_TRASH"])
                 return
 
-    # 破碎的知識 (15%)
     elif roll < 0.35:
         await interaction.followup.send("...你知道嗎？其實我剛才要說的是...算了，雜魚不需要知道那麼多喵。")
         await check_and_notify_achievement(interaction, "ABSTRACTION_MASTER", ACHIEVEMENTS["ABSTRACTION_MASTER"])
         return
 
-    # 人身攻擊 (10%)
     elif roll < 0.45:
         await interaction.followup.send("你知道嗎？你今天的穿搭看起來像一坨過期的雜魚，真是災難喵。")
         await check_and_notify_achievement(interaction, "SADIST_TARGET", ACHIEVEMENTS["SADIST_TARGET"])
         return
 
-    # 常規知識輸出
+    # 常規輸出
     fact = random.choice(facts)
-    await interaction.followup.send(embed=discord.Embed(description=fact, color=0xff69b4))
+    await interaction.followup.send(embed=discord.Embed(description=fact, color=0xffc0cb))
     
-    # 4. 更新統計與成就 (非同步執行，不影響發送)
+    # 3. 更新統計
     await db.execute(
-        "INSERT INTO user_logs (user_id, action, count) VALUES (?, 'know_count', 1) ON CONFLICT(user_id) DO UPDATE SET count = count + 1", 
+        "INSERT INTO user_logs (user_id, action, count) VALUES (?, 'know_count', 1) "
+        "ON CONFLICT(user_id, action) DO UPDATE SET count = count + 1", 
         (user_id,)
     )
     row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'know_count'", (user_id,))
     
     if row:
-        count = row[0]
-        if count >= 50:
-            await check_and_notify_achievement(interaction, "KNOWLEDGE_ADDICT", ACHIEVEMENTS["KNOWLEDGE_ADDICT"])
-        elif count >= 15:
-            await check_and_notify_achievement(interaction, "KNOWLEDGE_SPONGE", ACHIEVEMENTS["KNOWLEDGE_SPONGE"])
-        elif count >= 5:
-            await check_and_notify_achievement(interaction, "NOVICE_TRASH", ACHIEVEMENTS["NOVICE_TRASH"])
+        count = row['count']
+        if count >= 50: await check_and_notify_achievement(interaction, "KNOWLEDGE_ADDICT", ACHIEVEMENTS["KNOWLEDGE_ADDICT"])
+        elif count >= 15: await check_and_notify_achievement(interaction, "KNOWLEDGE_SPONGE", ACHIEVEMENTS["KNOWLEDGE_SPONGE"])
+        elif count >= 5: await check_and_notify_achievement(interaction, "NOVICE_TRASH", ACHIEVEMENTS["NOVICE_TRASH"])
 
 THEMES = {
     "水果": ["🍎", "🍊", "🍇", "🍓", "🍒", "🍑", "🍍", "🥝", "🥥", "🥑", "🍆", "🥦"],
@@ -987,36 +1135,77 @@ class GameMemoryView(discord.ui.View):
 )
 async def memory_game(interaction: discord.Interaction, 難度: str, 主題: str):
     view = GameMemoryView(難度, 主題)
-    embed = discord.Embed(description=f"主題：{主題} | 難度：{難度}\n請開始翻牌喵！", color=0xffc0cb)
+    embed = discord.Embed(
+        description=f"主題：{主題} | 難度：{難度}\n請開始翻牌喵！", 
+        color=0xffc0cb
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="game_bingo", description="與本喵對戰 Bingo！")
-@app_commands.describe(size="盤面大小 (3-5)")
-async def game_bingo(interaction: discord.Interaction, size: int):
-    if not (3 <= size <= 5):
-        return await interaction.response.send_message("大小請限制在 3 到 5 之間喵！", ephemeral=True)
-    
-    desc = f"Bingo 遊戲玩法：\n1. 本喵會為你產生 {size}x{size} 的數字盤面。\n2. 點擊按鈕標記數字，連成一線即可獲勝喵！\n\n準備好了就點擊下方開始吧喵！"
-    await interaction.response.send_message(desc, view=StartBingoView(size))
+@bot.tree.command(name="game_ooxx", description="與本喵進行 OOXX 對戰喵！")
+async def game_ooxx(interaction: discord.Interaction):
+    embed = discord.Embed(
+        description=(
+            "**喵喵井字對戰 (OOXX)**\n\n"
+            "1. 玩家為先手 (⭕)，本喵 (❌) 後手。\n"
+            "2. 點擊格子佔領位置，先連成一線即獲勝。\n"
+            "3. 輸給本喵的話，你就是雜魚喵！"
+        ),
+        color=0xffc0cb
+    )
+    await interaction.response.send_message(embed=embed, view=StartGameView())
 
-@bot.tree.command(name="bingo_rank", description="查看 Bingo 排行榜喵！")
-async def bingo_rank(interaction: discord.Interaction):
-    # 撈取數據
-    total_rows = await db.fetchall("SELECT user_id, total_wins FROM user_logs WHERE action = 'bingo_win' ORDER BY total_wins DESC LIMIT 5")
-    streak_rows = await db.fetchall("SELECT user_id, max_streak FROM user_logs WHERE action = 'bingo_win' ORDER BY max_streak DESC LIMIT 5")
-    
-    def format_rank(rows, key):
+class RankSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="🏆 總勝場排行榜", value="wins", description="查看累積勝場最多的玩家"),
+            discord.SelectOption(label="🔥 最高連勝排行榜", value="streak", description="查看連勝紀錄保持者")
+        ]
+        super().__init__(placeholder="請選擇要查看的排行榜...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        key = 'total_wins' if self.values[0] == 'wins' else 'max_streak'
+        title = "🏆 總勝場排行榜" if self.values[0] == 'wins' else "🔥 最高連勝排行榜"
+        
+        rows = await db.fetchall(f"SELECT user_id, {key} FROM user_logs WHERE action = 'ooxx_win' ORDER BY {key} DESC LIMIT 5")
+        
         res = ""
         for i, r in enumerate(rows, 1):
-            # 這裡可以使用 guild.get_member 處理名稱
             res += f"{i}. <@{r['user_id']}>: {r[key]} 次\n"
-        return res if res else "目前沒人上榜喵..."
+        
+        embed = discord.Embed(title=title, description=res or "目前沒人上榜喵...", color=0xff69b4)
+        await interaction.response.edit_message(embed=embed)
 
-    embed = discord.Embed(title="🏆 Bingo 雙榜榮譽", color=0xffd700)
-    embed.add_field(name="👑 總勝場王", value=format_rank(total_rows, 'total_wins'), inline=True)
-    embed.add_field(name="🔥 最高連勝紀錄", value=format_rank(streak_rows, 'max_streak'), inline=True)
-    
-    await interaction.response.send_message(embed=embed)
+class RankView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(RankSelect())
+
+@bot.tree.command(name="ooxx_rank", description="查看雜魚小貓娘 OOXX 排行榜喵！")
+async def ooxx_rank(interaction: discord.Interaction):
+    try:
+        # 1. 確保查詢欄位與資料庫實際結構一致 (通常是 count)
+        # 如果你的資料庫存勝場是用 action='ooxx_win'，那數值應該在 count 欄位
+        rows = await db.fetch_all("SELECT user_id, count FROM user_logs WHERE action = 'ooxx_win' ORDER BY count DESC LIMIT 5")
+        
+        # 2. 安全處理資料轉換
+        if not rows:
+            res = "目前沒人上榜喵..."
+        else:
+            res = ""
+            for i, r in enumerate(rows, 1):
+                # 處理可能是字典或 tuple 的情況
+                uid = r['user_id'] if isinstance(r, dict) else r[0]
+                val = r['count'] if isinstance(r, dict) else r[1]
+                res += f"{i}. <@{uid}>: {val} 次\n"
+
+        embed = discord.Embed(title="🏆 總勝場排行榜", description=res, color=0xff69b4)
+        
+        # 3. 如果 RankView 還沒寫好，先註解掉 view 參數
+        await interaction.response.send_message(embed=embed)
+        
+    except Exception as e:
+        print(f"排行榜指令錯誤: {e}")
+        await interaction.response.send_message(f"喵... 排行榜讀取失敗：{e}", ephemeral=True)
 
 @bot.tree.command(name="36計", description="讓本喵告訴你今天該用哪一計")
 async def strategy_36(interaction: discord.Interaction):
@@ -1064,7 +1253,7 @@ async def strategy_36(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="📜 今日錦囊妙計",
-        description=f"抽到的計謀：**{choice}**\n\n小貓娘吐槽：{comment}", 
+        description=f"抽到的計謀：**{choice}**\n\n本喵吐槽：{comment}", 
         color=0xffd700
     )
     await interaction.response.send_message(embed=embed)
@@ -1084,9 +1273,10 @@ async def strategy_36(interaction: discord.Interaction):
     app_commands.Choice(name="廢紙團", value="廢紙團")
 ])
 async def feed(interaction: discord.Interaction, food: str, target: discord.Member):
+    # 確保不會因為超時而報錯
     await interaction.response.defer()
     
-    # 定義基本評價
+    # 定義資料
     comments = {
         "貓草": "感覺身體變輕盈了喵，呼嚕呼嚕~", 
         "貓薄荷": "這、這是天堂的味道喵！(暈)", 
@@ -1094,8 +1284,6 @@ async def feed(interaction: discord.Interaction, food: str, target: discord.Memb
         "小魚乾": "最棒的獎勵了，本喵會記得妳的好的喵！", 
         "牛奶": "香醇濃郁，本喵喝得好開心喵！"
     }
-    
-    # 定義垃圾類反應
     trash_responses = [
         "你塞了個過期的罐頭給我，這是要毒死本喵嗎？喵！",
         "這看起來像廢紙團...不過勉強能吃飽，謝了喵。",
@@ -1105,41 +1293,48 @@ async def feed(interaction: discord.Interaction, food: str, target: discord.Memb
         "雜魚？你是在羞辱本喵的品味嗎？喵！"
     ]
 
-    # 判定餵食對象與內容
     is_trash = food in ["雜魚", "過期罐頭", "廢紙團"]
     
+    # 執行餵食的 Embed 邏輯
     if target.id == bot.user.id:
-        # 對本喵餵食
-        if is_trash:
-            response = random.choice(trash_responses)
-        else:
-            response = comments.get(food, "看起來很好吃喵！")
+        response = random.choice(trash_responses) if is_trash else comments.get(food, "看起來很好吃喵！")
         embed = discord.Embed(description=f"{interaction.user.mention} 餵了本喵吃 {food}！", color=0xffc0cb)
         embed.add_field(name="本喵評價:", value=response)
     else:
-        # 對其他人餵食
         embed = discord.Embed(description=f"{interaction.user.mention} 餵了 {target.mention} 吃 {food}！", color=0x87ceeb)
         embed.set_footer(text=f"評價: {comments.get(food, '這看起來很有趣喵！')}")
 
-    # 成就處理
-    messages_to_send = []
-    try:
-        if is_trash:
-            await db.execute("INSERT INTO user_logs (user_id, action, count) VALUES (?, 'feed_trash', 1) ON CONFLICT(user_id, action) DO UPDATE SET count = count + 1", (interaction.user.id, 'feed_trash'))
-            row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'feed_trash'", (interaction.user.id,))
-            new_count = row[0]['count'] if row else 1
-            
-            if new_count >= 5 and await unlock_achievement(interaction.user.id, "TRASH_COLLECTOR"):
-                messages_to_send.append(f"🏆 {ACHIEVEMENTS['TRASH_COLLECTOR']}")
-        
-        if await unlock_achievement(interaction.user.id, "FIRST_INTERACTION"):
-            messages_to_send.append(f"🏆 {ACHIEVEMENTS['FIRST_INTERACTION']}")
-    except Exception as e:
-        print(f"餵食成就處理錯誤: {e}")
-
+    # 發送結果
     await interaction.followup.send(embed=embed)
-    for msg in messages_to_send:
-        await interaction.followup.send(msg)
+
+    # --- 成就處理區塊 ---
+    try:
+        # 1. 處理初次互動 (放在餵食邏輯後，確保指令已成功執行)
+        await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS['FIRST_INTERACTION'])
+        
+        # 2. 處理垃圾成就
+        if is_trash:
+            await db.execute("""
+                INSERT INTO user_logs (user_id, action, count) 
+                VALUES (?, 'feed_trash', 1) 
+                ON CONFLICT(user_id, action) DO UPDATE SET count = count + 1
+            """, (interaction.user.id,))
+            
+            row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'feed_trash'", (interaction.user.id,))
+            
+            # 嚴謹的取值邏輯：防止 NoneType 錯誤
+            # 如果 row 是字典，取 ['count']；如果是 tuple，取 [0]；否則預設為 0
+            new_count = 0
+            if isinstance(row, dict):
+                new_count = row.get('count', 0)
+            elif row:
+                new_count = row[0]
+            
+            if new_count >= 5:
+                await check_and_notify_achievement(interaction, "TRASH_COLLECTOR", ACHIEVEMENTS['TRASH_COLLECTOR'])
+                
+    except Exception as e:
+        print(f"餵食指令成就處理錯誤: {e}")
 
 @bot.tree.command(name="喵喵喵", description="讓本喵喵喵喵給你聽(1小時限制3次)")
 @app_commands.describe(count="要喵幾聲(1000字以下)")
@@ -1165,9 +1360,7 @@ async def meow_meow(interaction: discord.Interaction, count: int):
     # 4. 發送訊息
     await interaction.response.send_message("喵" * count)
     
-    # 5. 成就觸發
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-    
+    # 5. 特定成就判定
     if count >= 1000:
         await check_and_notify_achievement(interaction, "MEOW_KING", ACHIEVEMENTS["MEOW_KING"])
     elif count >= 500:
@@ -1204,13 +1397,13 @@ async def set_birthday(interaction: discord.Interaction, year: int, month: int, 
 async def birthday_countdown(interaction: discord.Interaction, 是否公開: bool = False):
     bday_data = await db.fetch("SELECT birthday FROM user_birthdays WHERE user_id = ?", (interaction.user.id,))
     if not bday_data:
-        embed = discord.Embed(description="❌ 你還沒設定過生日喵！", color=discord.Color.pink())
+        embed = discord.Embed(description="❌ 你還沒設定過生日喵！", color=0xffc0cb)
         return await interaction.response.send_message(embed=embed, ephemeral=True)
     
     bday_str = bday_data[0]
     b_month, b_day = int(bday_str[4:6]), int(bday_str[6:8])
     
-    today = datetime.datetime.now()
+    today = datetime.now()
     target_year = today.year
     
     # 閏年生日平年處理
@@ -1218,14 +1411,33 @@ async def birthday_countdown(interaction: discord.Interaction, 是否公開: boo
         is_leap = (target_year % 4 == 0 and target_year % 100 != 0) or (target_year % 400 == 0)
         if not is_leap: b_month, b_day = 2, 28
             
-    next_bday = datetime.datetime(target_year, b_month, b_day)
+    next_bday = datetime(target_year, b_month, b_day)
     if next_bday < today:
-        next_bday = datetime.datetime(target_year + 1, b_month, b_day)
+        next_bday = datetime(target_year + 1, b_month, b_day)
         
     days_left = (next_bday - today).days
     # ephemeral 為 True 代表僅自己可見，這裡用 not 是否公開 來對應
-    embed = discord.Embed(description=f"⏳ 距離你的下一個生日還有 {days_left} 天喵！", color=discord.Color.pink())
+    embed = discord.Embed(description=f"⏳ 距離你的下一個生日還有 {days_left} 天喵！", color=0xffc0cb)
     await interaction.response.send_message(embed=embed, ephemeral=not 是否公開)
+
+@bot.tree.command(name="設定生日頻道", description="設定伺服器的生日公告頻道 (限管理員)")
+@app_commands.describe(頻道="選擇要發送生日祝賀的頻道")
+async def set_birthday_channel(interaction: discord.Interaction, 頻道: discord.TextChannel):
+    if interaction.user.id != DEVELOPER_ID:
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message("走開，只有本喵的開發者或是這個伺服器的管理員能用喵！", ephemeral=True)
+
+    await db.execute(
+        "INSERT OR REPLACE INTO guild_settings (guild_id, birthday_channel_id) VALUES (?, ?)", 
+        (interaction.guild_id, 頻道.id)
+    )
+    
+    embed = discord.Embed(
+        title="設定完成",
+        description=f"生日公告頻道已設定為: {頻道.mention}",
+        color=0xffc0cb
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 # 生日隱私權設定
 @bot.tree.command(name="生日隱私權", description="設定你的生日公開或隱私")
@@ -1233,14 +1445,14 @@ async def birthday_countdown(interaction: discord.Interaction, 是否公開: boo
 async def set_birthday_privacy(interaction: discord.Interaction, 是否公開: bool):
     await db.execute("UPDATE user_birthdays SET privacy = ? WHERE user_id = ?", (1 if 是否公開 else 0, interaction.user.id))
     status = "公開" if 是否公開 else "隱私"
-    embed = discord.Embed(description=f"✅ 生日隱私設定已變更為：{status}喵！", color=discord.Color.pink())
+    embed = discord.Embed(description=f"✅ 生日隱私設定已變更為：{status}喵！", color=0xffc0cb)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ping", description="查看機器人延遲")
 async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     # 建立一個簡單的 embed 物件
-    embed = discord.Embed(description=f"目前的延遲是：**{latency}ms** 喵！", color=discord.Color.pink())
+    embed = discord.Embed(description=f"目前的延遲是：**{latency}ms** 喵！", color=0xffc0cb)
     await interaction.response.send_message(embed=embed)
     
 @bot.tree.command(name="狀態監測", description="查看機器人當前系統狀態")
@@ -1278,14 +1490,12 @@ async def keyword_toggle(interaction: discord.Interaction, 參數: app_commands.
 async def catgirl_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
     await interaction.response.send_message(embed=create_index_embed(t, f"本喵覺得 {t.mention} 的貓娘指數是 **{random.randint(0, 100)}%** 喵！(,,・ω・,,)", 0xffc0cb))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
 
 @bot.tree.command(name="隨機指數", description="隨機測一個指數")
 async def random_index(interaction: discord.Interaction):
     t = interaction.user
     choice = random.choice(["貓娘指數", "男娘指數", "男同指數", "共產指數", "ㄌㄌ指數", "雜魚指數", "傲嬌指數", "可愛指數"])
     await interaction.response.send_message(embed=create_index_embed(t, f"本喵幫妳測了一下，妳的{choice}是 **{random.randint(0, 100)}%** 喵！", 0xffc0cb))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
 
 @bot.tree.command(name="男娘指數", description="檢測男娘機率")
 @app_commands.describe(目標="要檢測的對象")
@@ -1297,54 +1507,45 @@ async def femboy_index(interaction: discord.Interaction, 目標: discord.Member 
     else: desc = f"喵！{t.mention} 的男娘機率是 **{random.randint(1, 100)}%**！"
     
     await interaction.response.send_message(embed=create_index_embed(t, desc, 0xffc0cb))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-    if t.id == bot.user.id: await check_and_notify_achievement(interaction, "DISCOVER_SECRET", "發現秘密：你竟然敢調戲本喵！")
+    if t.id == bot.user.id: await check_and_notify_achievement(interaction, "DISCOVER_SECRET", ACHIEVEMENTS["DISCOVER_SECRET"])
 
 @bot.tree.command(name="雜魚指數", description="檢測雜魚機率")
 @app_commands.describe(目標="要檢測的對象")
 async def trash_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
-    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的雜魚機率是 **{random.randint(1, 100)}%**！雜魚~雜魚~", 0x808080))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的雜魚機率是 **{random.randint(1, 100)}%**！雜魚~雜魚~", 0xffc0cb))
 
 @bot.tree.command(name="傲嬌指數", description="檢測傲嬌機率")
 @app_commands.describe(目標="要檢測的對象")
 async def tsundere_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
-    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的傲嬌機率是 **{random.randint(1, 100)}%**！才、才沒有喜歡你呢！", 0xff4500))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的傲嬌機率是 **{random.randint(1, 100)}%**！才、才沒有喜歡你呢！", 0xffc0cb))
 
 @bot.tree.command(name="可愛指數", description="檢測可愛機率")
 @app_commands.describe(目標="要檢測的對象")
 async def cute_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
-    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的可愛機率是 **{random.randint(1, 100)}%**！超級可愛的喵！", 0xff69b4))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的可愛機率是 **{random.randint(1, 100)}%**！超級可愛的喵！", 0xffc0cb))
 
 @bot.tree.command(name="男同指數", description="檢測男同機率")
 @app_commands.describe(目標="要檢測的對象")
 async def gay_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
     desc = f"喵？{t.mention} 的性向是異性戀！絕對不可能是男同的喵！" if t.id == DEVELOPER_ID else f"喵！{t.mention} 的男同機率是 **{random.randint(1, 100)}%**！"
-    await interaction.response.send_message(embed=create_index_embed(t, desc, 0x87cefa))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await interaction.response.send_message(embed=create_index_embed(t, desc, 0xffc0cb))
 
 @bot.tree.command(name="共產指數", description="檢測共產機率")
 @app_commands.describe(目標="要檢測的對象")
 async def communist_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
-    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的共產機率是 **{random.randint(1, 100)}%**！", 0xff0000))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await interaction.response.send_message(embed=create_index_embed(t, f"喵！{t.mention} 的共產機率是 **{random.randint(1, 100)}%**！", 0xffc0cb))
 
 @bot.tree.command(name="ㄌㄌ指數", description="檢測ㄌㄌ機率")
 @app_commands.describe(目標="要檢測的對象")
 async def loli_index(interaction: discord.Interaction, 目標: discord.Member = None):
     t = 目標 or interaction.user
     desc = f"喵？{t.mention} 是男的！怎麼可能是ㄌㄌ！" if t.id == DEVELOPER_ID else f"喵！{t.mention} 的ㄌㄌ機率是 **{random.randint(1, 100)}%**！"
-    await interaction.response.send_message(embed=create_index_embed(t, desc, 0xff69b4))
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-
-from datetime import datetime
+    await interaction.response.send_message(embed=create_index_embed(t, desc, 0xffc0cb))
 
 @bot.tree.command(name="求籤", description="抽取運勢並由雜魚小貓娘為你解析")
 async def draw_fortune_slash(interaction: discord.Interaction):
@@ -1372,11 +1573,10 @@ async def draw_fortune_slash(interaction: discord.Interaction):
         color=0xffc0cb
     )
     embed.set_thumbnail(url=bot.user.display_avatar.url)
+    
     await interaction.response.send_message(embed=embed)
     
-    # 觸發成就
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-    
+    # 特定成就觸發
     if result == "超大吉":
         await check_and_notify_achievement(interaction, "LUCKY_STAR", ACHIEVEMENTS["LUCKY_STAR"])
         
@@ -1426,25 +1626,29 @@ class RPSView(discord.ui.View):
 @bot.tree.command(name="猜拳", description="和雜魚小貓娘玩猜拳")
 async def rps_game(interaction: discord.Interaction):
     view = RPSView(interaction.user)
-    embed = discord.Embed(description="請選擇你要出的拳喵！", color=0xffc0cb)
+    embed = discord.Embed(
+        description="請選擇你要出的拳喵！", 
+        color=0xffc0cb
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
 @bot.tree.command(name="尋找色色群主", description="呼叫群主")
 async def find_owner_slash(interaction: discord.Interaction):
-    # 1. 發送呼叫訊息
+    # 獲取群主用戶物件
+    target_user = bot.get_user(1277791709563981928) or await bot.fetch_user(1277791709563981928)
+    
+    # 建立 Embed 並加入頭像
     embed = discord.Embed(
-        description=f"📢 喵！正在尋找色色的星音群主 <@{TARGET_USER_2}>，快出來喵！", 
+        description=f"📢 喵！正在尋找色色的星音群主 {target_user.mention}，快出來喵！", 
         color=0xffc0cb
     )
+    embed.set_thumbnail(url=target_user.display_avatar.url)
+    
     await interaction.response.send_message(embed=embed)
     
-    # 2. 觸發基礎成就
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-    
-    # 3. 新增成就邏輯：尋找色色群主專屬成就
-    # 使用 30% 機率觸發，增加互動樂趣
+    # 專屬成就邏輯 (FIRST_INTERACTION 已交由全局處理)
     if random.random() < 0.3:
-        await check_and_notify_achievement(interaction, "LEWD_DETECTIVE", "色色偵探：你挖掘到了群主的隱藏屬性！")
+        await check_and_notify_achievement(interaction, "LEWD_DETECTIVE", ACHIEVEMENTS["LEWD_DETECTIVE"])
 
 @bot.tree.command(name="祈福", description="讓雜魚小貓娘為你進行專屬祈福")
 async def pray_slash(interaction: discord.Interaction, 目標: discord.Member = None):
@@ -1472,59 +1676,101 @@ async def pray_slash(interaction: discord.Interaction, 目標: discord.Member = 
     embed.set_thumbnail(url=target.display_avatar.url)
     await interaction.followup.send(embed=embed)
     
-    # 3. 安全更新資料庫 (修正導致程式崩潰的語法)
-    row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'pray_count'", (user_id,))
-    count = (row[0] + 1) if row else 1
-    
-    if row:
-        await db.execute("UPDATE user_logs SET count = ? WHERE user_id = ? AND action = 'pray_count'", (count, user_id))
-    else:
-        await db.execute("INSERT INTO user_logs (user_id, action, count) VALUES (?, 'pray_count', 1)", (user_id,))
+    # 3. 處理初次互動成就 (新增這行！)
+    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+
+    # 4. 安全更新資料庫
+    # 這裡建議使用 UPSERT 語法，程式碼會更精簡且不容易出錯
+    try:
+        await db.execute("""
+            INSERT INTO user_logs (user_id, action, count) 
+            VALUES (?, 'pray_count', 1) 
+            ON CONFLICT(user_id, action) DO UPDATE SET count = count + 1
+        """, (user_id,))
         
-    # 4. 最後判定成就
-    if is_midnight:
-        await check_and_notify_achievement(interaction, "MIDNIGHT_PRAYER", ACHIEVEMENTS["MIDNIGHT_PRAYER"])
-    if count == 10:
-        await check_and_notify_achievement(interaction, "CAT_BLESSING", ACHIEVEMENTS["CAT_BLESSING"])
+        # 獲取更新後的次數
+        row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'pray_count'", (user_id,))
+        count = row[0] if row else 1
+            
+        # 5. 最後判定成就
+        if is_midnight:
+            await check_and_notify_achievement(interaction, "MIDNIGHT_PRAYER", ACHIEVEMENTS["MIDNIGHT_PRAYER"])
+        if count == 10:
+            await check_and_notify_achievement(interaction, "CAT_BLESSING", ACHIEVEMENTS["CAT_BLESSING"])
+            
+    except Exception as e:
+        print(f"祈福成就/統計更新錯誤: {e}")
 
 @bot.tree.command(name="看雜魚小貓娘", description="查看本喵的美圖")
 async def show_catgirl(interaction: discord.Interaction):
     user_id = interaction.user.id
     try:
-        # 1. 記錄查看次數
-        await db.execute("INSERT INTO user_logs (user_id, action, count) VALUES (?, 'view_photo', 1) ON CONFLICT(user_id) DO UPDATE SET count = count + 1", (user_id,))
+        # 1. 更新資料庫
+        await db.execute(
+            "INSERT INTO user_logs (user_id, action, count) VALUES (?, 'view_photo', 1) "
+            "ON CONFLICT(user_id, action) DO UPDATE SET count = count + 1", 
+            (user_id,)
+        )
         row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'view_photo'", (user_id,))
+        count = row['count'] if row else 1
         
-        # 2. 發送圖片
+        # 2. 發送圖片 (使用 Embed 以統一視覺)
         file = discord.File(CATGIRL_IMAGE_PATH, filename="catgirl.png")
-        await interaction.response.send_message("喵～這是我的珍藏美圖，不准隨便亂傳喔！", file=file)
+        embed = discord.Embed(
+            description="喵～這是我的珍藏美圖，不准隨便亂傳喔！",
+            color=0xffc0cb
+        )
+        embed.set_image(url="attachment://catgirl.png")
+        await interaction.response.send_message(embed=embed, file=file)
         
-        # 3. 觸發成就
-        await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-        
-        count = row[0] if row else 0
+        # 3. 特定成就判定
         if count >= 10:
             await check_and_notify_achievement(interaction, "CATGIRL_COLLECTOR", ACHIEVEMENTS["CATGIRL_COLLECTOR"])
             
     except Exception as e:
         await interaction.response.send_message("喵嗚...找不到圖片，可能路徑有問題喵！")
 
-class JumpModal(discord.ui.Modal, title="跳轉頁面"):
+class JumpModal(discord.ui.Modal):
     def __init__(self, view):
-        super().__init__()
+        # 標題可以動態化，讓體驗更好
+        super().__init__(title="跳轉頁面")
         self.view = view
-
-    page = discord.ui.TextInput(label="輸入頁碼", placeholder="例如: 1", min_length=1, max_length=3)
+        
+        # 定義輸入框
+        self.page_input = discord.ui.TextInput(
+            label="請輸入頁碼", 
+            placeholder="例如: 1", 
+            min_length=1, 
+            max_length=3
+        )
+        self.add_item(self.page_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            target = int(self.page.value) - 1
-            if 0 <= target < len(self.view.image_list):
-                self.view.index = target
-                await self.view.update_view(interaction)
-            else:
-                # 這裡使用 ephemeral 訊息提醒用戶
-                await interaction.response.send_message("❌ 頁碼超出範圍！", ephemeral=True)
+            target = int(self.page_input.value) - 1
+            
+            # 判斷 View 類型並進行跳轉
+            # 如果有 all_data，代表是成就/單字清單 (頁數模式)
+            if hasattr(self.view, 'all_data') or hasattr(self.view, 'total_pages'):
+                max_page = getattr(self.view, 'total_pages', len(getattr(self.view, 'all_data', [])))
+                if 0 <= target < max_page:
+                    self.view.current_page = target if hasattr(self.view, 'current_page') else target
+                    self.view.page = target if hasattr(self.view, 'page') else target
+                    
+                    # 重新整理顯示
+                    if hasattr(self.view, 'update_buttons'): self.view.update_buttons()
+                    await interaction.response.edit_message(embed=self.view.get_embed(), view=self.view)
+                else:
+                    await interaction.response.send_message(f"❌ 頁碼超出範圍 (1-{max_page})！", ephemeral=True)
+            
+            # 如果是圖片模式 (index 模式)
+            elif hasattr(self.view, 'image_list'):
+                if 0 <= target < len(self.view.image_list):
+                    self.view.index = target
+                    await self.view.update_view(interaction)
+                else:
+                    await interaction.response.send_message(f"❌ 索引超出範圍 (1-{len(self.view.image_list)})！", ephemeral=True)
+                    
         except ValueError:
             await interaction.response.send_message("❌ 請輸入有效的阿拉伯數字！", ephemeral=True)
 
@@ -1534,31 +1780,33 @@ class ImageView(discord.ui.View):
         self.image_list = image_list
         self.index = 0
 
+    def update_buttons(self):
+        self.prev_btn.disabled = (self.index == 0)
+        self.next_btn.disabled = (self.index >= len(self.image_list) - 1)
+
     async def update_view(self, interaction: discord.Interaction):
+        self.update_buttons()
         embed = discord.Embed(title="逆天圖片 檢視", color=0xffc0cb)
         embed.set_image(url=self.image_list[self.index])
         embed.set_footer(text=f"第 {self.index + 1} 張 / 共 {len(self.image_list)} 張")
         
-        try:
-            if interaction.response.is_done():
-                await interaction.edit_original_response(embed=embed, view=self)
-            else:
-                await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            print(f"按鈕更新失敗: {e}")
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="⬅️ 上一張", style=discord.ButtonStyle.primary, custom_id="prev")
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = (self.index - 1) % len(self.image_list)
+    @discord.ui.button(label="⬅️ 上一張", style=discord.ButtonStyle.primary, custom_id="img_prev")
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
         await self.update_view(interaction)
 
-    @discord.ui.button(label="🔢 跳轉", style=discord.ButtonStyle.secondary, custom_id="jump")
+    @discord.ui.button(label="🔢 跳轉", style=discord.ButtonStyle.secondary, custom_id="img_jump")
     async def jump(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(JumpModal(self))
 
-    @discord.ui.button(label="➡️ 下一張", style=discord.ButtonStyle.primary, custom_id="next")
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = (self.index + 1) % len(self.image_list)
+    @discord.ui.button(label="➡️ 下一張", style=discord.ButtonStyle.primary, custom_id="img_next")
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
         await self.update_view(interaction)
 
 @bot.tree.command(name="逆天圖片", description="檢視逆天圖片")
@@ -1575,22 +1823,24 @@ async def view_quotes(interaction: discord.Interaction):
         return await interaction.followup.send("喵！目前沒有圖片。", ephemeral=True)
         
     # 1. 優先發送主訊息與 UI
-    embed = discord.Embed(title="逆天圖片 檢視", color=0xffc0cb)
+    embed = discord.Embed(
+        description="逆天圖片檢視系統已啟動喵！",
+        color=0xffc0cb
+    )
     embed.set_image(url=image_list[0])
     embed.set_footer(text=f"第 1 張 / 共 {len(image_list)} 張")
     await interaction.followup.send(embed=embed, view=ImageView(image_list))
     
-    # 2. 安全更新資料庫 (修正導致程式崩潰的語法)
+    # 2. 安全更新資料庫
     row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'view_quotes'", (user_id,))
-    count = (row[0] + 1) if row else 1
+    count = (row['count'] + 1) if row else 1
     
     if row:
         await db.execute("UPDATE user_logs SET count = ? WHERE user_id = ? AND action = 'view_quotes'", (count, user_id))
     else:
         await db.execute("INSERT INTO user_logs (user_id, action, count) VALUES (?, 'view_quotes', 1)", (user_id,))
         
-    # 3. 最後判定成就
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    # 3. 特定成就判定
     if count == 15:
         await check_and_notify_achievement(interaction, "GALLERY_MASTER", ACHIEVEMENTS["GALLERY_MASTER"])
 
@@ -1606,45 +1856,71 @@ async def reset_my_stats(interaction: discord.Interaction, 項目: str):
     
     try:
         if 項目 == "all":
+            # 刪除多個相關表，確保清除乾淨
             await db.execute("DELETE FROM user_logs WHERE user_id = ?", (interaction.user.id,))
             msg = "✅ 已清除你所有的互動統計數據，重獲新生了喵！"
         else:
             # 刪除指定 action 的記錄
             await db.execute("DELETE FROM user_logs WHERE user_id = ? AND action = ?", (interaction.user.id, 項目))
             msg = f"✅ 已將你的 {項目} 統計資料歸零喵。"
-            
-        await db.connection.commit()
+        
+        # 移除 db.connection.commit()，因為在大多數封裝中這是多餘的
+        # 如果你的 db 類別有提供 commit 方法，請改用 await db.commit() 
+        # 但絕對不要直接存取 db.connection
+        
         await interaction.followup.send(msg, ephemeral=True)
         
     except Exception as e:
+        print(f"DEBUG: 刪除統計失敗 - {e}")
         await interaction.followup.send(f"❌ 操作失敗，本喵處理資料時卡住了喵：{e}", ephemeral=True)
 
 class AchievementView(discord.ui.View):
-    def __init__(self, user_name, user_avatar, all_data, user_total, total_count):
-        super().__init__(timeout=60)
+    def __init__(self, all_data, user_name=None, user_avatar=None, user_total=None, total_count=None):
+        super().__init__(timeout=None)
+        # 如果有 user_name，代表是個人清單；否則為成就百科
+        self.is_list = user_name is not None
         self.user_name = user_name
         self.user_avatar = user_avatar
-        self.all_data = [all_data[i:i + 10] for i in range(0, len(all_items), 10)] # 每頁10個
-        self.current_page = 0
         self.user_total = user_total
         self.total_count = total_count
+        
+        # 分頁邏輯
+        self.all_data = [all_data[i:i + 10] for i in range(0, len(all_data), 10)]
+        self.current_page = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = (self.current_page == 0)
+        self.next_btn.disabled = (self.current_page >= len(self.all_data) - 1)
 
     def get_embed(self):
-        embed = discord.Embed(title=f"📜 {self.user_name} 的成就清單", color=0xffff00)
-        embed.set_thumbnail(url=self.user_avatar)
-        embed.description = f"**收集進度：** {self.user_total} / {self.total_count}\n\n"
-        embed.description += "\n".join(self.all_data[self.current_page])
-        embed.set_footer(text=f"第 {self.current_page + 1} / {max(1, len(self.all_data))} 頁")
+        if self.is_list:
+            embed = discord.Embed(title=f"📜 {self.user_name} 的成就清單", color=0xffff00)
+            embed.set_thumbnail(url=self.user_avatar)
+            embed.description = f"**收集進度：** {self.user_total} / {self.total_count}\n\n" + "\n".join(self.all_data[self.current_page])
+        else:
+            embed = discord.Embed(title=f"📜 成就百科 (第 {self.current_page + 1}/{len(self.all_data)} 頁)", color=0x9b59b6)
+            embed.description = "\n".join(self.all_data[self.current_page])
+            embed.set_footer(text="提示：點擊 ||黑框|| 可以揭曉隱藏提示喵！")
+        
+        if not self.is_list: # 若非清單，補上頁碼資訊
+            embed.set_footer(text=f"第 {self.current_page + 1} / {len(self.all_data)} 頁 | 點擊 ||黑框|| 查看提示")
         return embed
 
-    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.primary)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page = max(0, self.current_page - 1)
+    @discord.ui.button(label="⬅️ 上一頁", style=discord.ButtonStyle.primary, custom_id="ach_prev")
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self.update_buttons()
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
-    @discord.ui.button(label="➡️", style=discord.ButtonStyle.primary)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page = min(len(self.all_data) - 1, self.current_page + 1)
+    @discord.ui.button(label="🔢 跳轉", style=discord.ButtonStyle.secondary, custom_id="ach_jump")
+    async def jump(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(JumpModal(self))
+
+    @discord.ui.button(label="➡️ 下一頁", style=discord.ButtonStyle.primary, custom_id="ach_next")
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self.update_buttons()
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
 @bot.tree.command(name="成就", description="查看你的成就清單")
@@ -1653,48 +1929,20 @@ async def view_achievements(interaction: discord.Interaction):
     
     user_achievements = await get_my_achievements(interaction.user.id)
     total_achievements = len(ACHIEVEMENTS)
-    user_total = len(user_achievements)
-    
-    embed = discord.Embed(title=f"📜 {interaction.user.display_name} 的成就清單", color=0xffff00)
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.description = f"**收集進度：** {user_total} / {total_achievements}\n\n"
     
     if not user_achievements:
-        embed.description += "喵...你目前還沒有解鎖任何成就，快去跟本喵互動吧！"
-        await interaction.followup.send(embed=embed) # 沒有成就，不加 View
-    else:
-        # 有成就，整理資料並啟用分頁
-        all_items = [f"🔸 {ach}" for ach in user_achievements]
-        view = AchievementView(
-            interaction.user.display_name, 
-            interaction.user.display_avatar.url, 
-            all_items, 
-            user_total, 
-            total_achievements
-        )
-        await interaction.followup.send(embed=view.get_embed(), view=view)
+        await interaction.followup.send("喵...你目前還沒有解鎖任何成就，快去跟本喵互動吧！")
+        return
 
-class AchievementView(discord.ui.View):
-    def __init__(self, pages):
-        super().__init__(timeout=60)
-        self.pages = pages
-        self.current_page = 0
-
-    def get_embed(self):
-        embed = discord.Embed(title=f"📜 成就百科 (第 {self.current_page + 1}/{len(self.pages)} 頁)", color=0x9b59b6)
-        embed.description = "\n".join(self.pages[self.current_page])
-        embed.set_footer(text="提示：點擊 ||黑框|| 可以揭曉隱藏提示喵！")
-        return embed
-
-    @discord.ui.button(label="⬅️ 上一頁", style=discord.ButtonStyle.primary)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page = max(0, self.current_page - 1)
-        await interaction.response.edit_message(embed=self.get_embed(), view=self)
-
-    @discord.ui.button(label="下一頁 ➡️", style=discord.ButtonStyle.primary)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page = min(len(self.pages) - 1, self.current_page + 1)
-        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    all_items = [f"🔸 {ach}" for ach in user_achievements]
+    view = AchievementView(
+        all_data=all_items,
+        user_name=interaction.user.display_name,
+        user_avatar=interaction.user.display_avatar.url,
+        user_total=len(user_achievements),
+        total_count=total_achievements
+    )
+    await interaction.followup.send(embed=view.get_embed(), view=view)
 
 @bot.tree.command(name="成就百科", description="查看本喵給你頒發的成就清單喵！")
 async def achievements(interaction: discord.Interaction):
@@ -1716,59 +1964,6 @@ async def achievements(interaction: discord.Interaction):
     
     view = AchievementView(pages)
     await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
-
-@bot.tree.command(name="help", description="顯示功能說明書喵！")
-async def help(interaction: discord.Interaction):
-    embed = discord.Embed(title="📜 雜魚小貓娘 | 完整功能說明書", description="本喵專職負責你的娛樂、數據檢測與防禦保護。若有操作問題，請詳閱下方清單喵。", color=0xffc0cb)
-    
-    embed.add_field(name="🛡️ 防禦與保護指令 (限管)", value=(
-        "• **/保護等級 [1-5]**：設定頻道防炸保護強度。\n"
-        "• **/關鍵詞檢測 [ON/OFF]**：切換敏感詞攔截系統。\n"
-        "• **/重置暱稱**：強制還原本喵的暱稱設定。\n"
-        "• **/頂號 [訊息] [T/F] [標記]**：發送伺服器公告廣播。"
-    ), inline=False)
-    
-    embed.add_field(name="🛠️ 實用系統工具", value=(
-        "• **/ai [模型] [訊息]**：呼叫深度 AI 進行邏輯對話與分析。\n"
-        "• **/翻譯 [文字]**：多國語言即時轉換。\n"
-        "• **/狀態監測**：查看伺服器與機器人運行負載。\n"
-        "• **/ping**：檢測 API 即時連線延遲。\n"
-        "• **/刪除我的統計**：選擇並清除你的互動統計數據。"
-    ), inline=False)
-    
-    embed.add_field(name="🎮 娛樂與互動遊戲", value=(
-        "• **/game_2048**：開始一場 2048 益智遊戲。\n"
-        "• **/game_memory**：開啟記憶翻牌挑戰。\n"
-        "• **/game_bingo [大小]**：發起 3x3 或 5x5 賓果對戰。\n"
-        "• **/bingo_rank**：查看總勝場與最高連勝的雙榜榮耀。\n"
-        "• **/你知道嗎**：隨機掉落本喵的逆天冷知識。\n"
-        "• **/小提示**：獲取本喵隨機提供的操作小技巧或廢話。\n"
-        "• **/餵食**：給本喵一點貢品。\n"
-        "• **/猜拳**：跟本喵一決高下。\n"
-        "• **/求籤/祈福 [目標]**：每日運勢鑑定與專屬祈福。\n"
-        "• **/36計**：讓本喵告訴你今天該用哪一計。\n"
-        "• **/尋找色色群主**：呼叫色色的星音群主。\n"
-        "• **/看雜魚小貓娘/逆天圖片**：開啟本喵私藏圖庫。"
-    ), inline=False)
-    
-    embed.add_field(name="📊 數值檢測系統", value=(
-        "• **/貓娘/男娘/男同指數**：鑑定目標的屬性數值喵。\n"
-        "• **/雜魚/傲嬌/可愛指數**：分析個人特質，純屬娛樂喵。\n"
-        "• **/共產/ㄌㄌ/隨機指數**：本喵的特色趣味鑑定喵。"
-    ), inline=False)
-    
-    embed.add_field(name="🎂 生日與成就紀念", value=(
-        "• **/成就百科**：查看你解鎖的成就清單與神祕提示喵！(試著挖掘隱藏關鍵詞來解鎖成就吧喵！)\n"
-        "• **/生日設定/隱私權/倒數**：紀錄你的生日，本喵會給驚喜。"
-    ), inline=False)
-    
-    embed.add_field(name="⚡ 自動觸發系統 (隱藏彩蛋)", value=(
-        "• 包含多種關鍵詞互動（如：色色、刀、男娘等）。\n"
-        "• 觸發特定關鍵詞可獲得隱藏成就與特殊回覆喵！"
-    ), inline=False)
-    
-    embed.set_footer(text=f"💡 {random.choice(TIPS)} | 最後更新: 2026-06-13")
-    await interaction.response.send_message(embed=embed)
 
 # 防護等級變數
 PROTECT_LEVEL = 1  
@@ -1804,23 +1999,33 @@ async def translate_slash(interaction: discord.Interaction, text: str, target: s
 @bot.tree.command(name="ai", description="向 AI 提問")
 @app_commands.describe(
     model="選擇 AI 模型",
-    prompt="輸入你想問的內容"
+    prompt="輸入內容",
+    setting="選擇性格模式 (選填，預設為雜魚小貓娘)"
 )
 @app_commands.choices(
-    model=MODEL_CHOICES
+    model=MODEL_CHOICES,
+    setting=[
+        app_commands.Choice(name="雜魚小貓娘", value="雜魚小貓娘"),
+        app_commands.Choice(name="嚴肅模式", value="嚴肅模式"),
+        app_commands.Choice(name="Debug 模式", value="Debug"),
+        app_commands.Choice(name="翻譯專家", value="翻譯專家")
+    ]
 )
-async def ai_slash(interaction: discord.Interaction, model: str, prompt: str):
+# 設定參數為 Optional，並給予預設值
+async def ai_slash(
+    interaction: discord.Interaction, 
+    model: str, 
+    prompt: str, 
+    setting: Optional[str] = "雜魚小貓娘"
+):
     await interaction.response.defer()
-    await get_ai_response(interaction, prompt, model)
+    await get_ai_response(interaction, prompt, model, setting)
 
-@bot.tree.command(name="ai_reset", description="清除 AI 對話記憶")
+@bot.tree.command(name="ai_reset", description="清除 AI 全體對話記憶")
 async def ai_reset(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    if user_id in memory_storage:
-        memory_storage[user_id] = {"ai_messages": [], "dc_messages": []}
-        await interaction.response.send_message("✅ AI 記憶已重置！", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ 你目前沒有進行中的對話。", ephemeral=True)
+    # 重置全域記憶體
+    memory_storage["global"] = {"ai_messages": []}
+    await interaction.response.send_message("✅ 全體 AI 記憶已重置喵！")
 
 @bot.tree.command(name="dsize", description="檢測你的那個大小喵")
 @app_commands.describe(目標="要檢測的對象")
@@ -1846,42 +2051,54 @@ async def dsize(interaction: discord.Interaction, 目標: discord.Member = None)
     embed = discord.Embed(description=desc, color=0xffc0cb)
     await interaction.response.send_message(embed=embed)
     
-    # 成就檢查
+    # 成就檢查 (移除了內部的 title 字串，直接呼叫你原本定義的 ACHIEVEMENTS)
     if length >= 45:
-        await check_and_notify_achievement(interaction, "GIANT_SIZE", "巨大化：這簡直是逆天的尺寸喵！")
+        await check_and_notify_achievement(interaction, "GIANT_SIZE", ACHIEVEMENTS["GIANT_SIZE"])
     elif length <= 5:
-        await check_and_notify_achievement(interaction, "MINI_SIZE", "袖珍型：...喵？沒看到喵？")
+        await check_and_notify_achievement(interaction, "MINI_SIZE", ACHIEVEMENTS["MINI_SIZE"])
 
-# EQ 指令
-@bot.tree.command(name="eq", description="鑑定情緒商數喵！")
-@app_commands.describe(目標="要鑑定的對象")
+@bot.tree.command(name="情緒數值", description="鑑定情緒數值喵！")
 async def eq(interaction: discord.Interaction, 目標: discord.Member = None):
     target = 目標 or interaction.user
     score = random.randint(0, 180)
     
-    # 針對 EQ 的吐槽邏輯
-    if score < 60: comment = "你的情緒控制是災難等級的吧喵？"
-    elif score < 120: comment = "勉強能正常社交，雜魚合格喵。"
-    else: comment = "過於理性，看來是個冷血的雜魚呢喵。"
+    if score < 60: 
+        comment = "你的情緒控制是災難等級的吧喵？"
+        await check_and_notify_achievement(interaction, "EQ_DISASTER", ACHIEVEMENTS["EQ_DISASTER"])
+    elif score > 160:
+        comment = "這數值...簡直冷血到了極點喵。"
+        await check_and_notify_achievement(interaction, "EQ_GENIUS", ACHIEVEMENTS["EQ_GENIUS"])
+    elif score < 120: 
+        comment = "勉強能正常社交，雜魚合格喵。"
+    else: 
+        comment = "過於理性，看來是個冷血的雜魚呢喵。"
     
-    embed = discord.Embed(title="情緒商數鑑定", color=0xff69b4)
-    embed.description = f"{target.mention} 的 EQ 為：**{score}**\n{comment}"
+    embed = discord.Embed(
+        description=f"{target.mention} 的情緒數值為：**{score}**\n{comment}",
+        color=0xffc0cb
+    )
     await interaction.response.send_message(embed=embed)
 
-# IQ 指令
-@bot.tree.command(name="iq", description="鑑定智商數值喵！")
-@app_commands.describe(目標="要鑑定的對象")
+@bot.tree.command(name="智商數值", description="鑑定智商數值喵！")
 async def iq(interaction: discord.Interaction, 目標: discord.Member = None):
     target = 目標 or interaction.user
     score = random.randint(0, 180)
     
-    # 針對 IQ 的吐槽邏輯
-    if score < 60: comment = "這智商，大概只剩基礎的呼吸功能了吧喵。"
-    elif score < 120: comment = "普通的智商，也就是個路人雜魚喵。"
-    else: comment = "這麼高分...該不會是為了魔改歷史而生的瘋子吧喵？"
+    if score < 60: 
+        comment = "這智商，大概只剩基礎的呼吸功能了吧喵。"
+        await check_and_notify_achievement(interaction, "IQ_EMPTY", ACHIEVEMENTS["IQ_EMPTY"])
+    elif score > 160:
+        comment = "這麼高分...該不會是為了魔改歷史而生的瘋子吧喵？"
+        await check_and_notify_achievement(interaction, "IQ_GENIUS", ACHIEVEMENTS["IQ_GENIUS"])
+    elif score < 120: 
+        comment = "普通的智商，也就是個路人雜魚喵。"
+    else: 
+        comment = "這智商還行，勉強脫離雜魚範圍喵。"
     
-    embed = discord.Embed(title="智商數值鑑定", color=0x4169e1)
-    embed.description = f"{target.mention} 的 IQ 為：**{score}**\n{comment}"
+    embed = discord.Embed(
+        description=f"{target.mention} 的智商數值為：**{score}**\n{comment}",
+        color=0xffc0cb
+    )
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="本喵要玩玩具", description="拿玩具出來逗本喵喵！")
@@ -1895,9 +2112,18 @@ async def iq(interaction: discord.Interaction, 目標: discord.Member = None):
     app_commands.Choice(name="貓草球", value="貓草球")
 ])
 async def play_toy(interaction: discord.Interaction, 玩具: app_commands.Choice[str]):
+    user_id = interaction.user.id
     toy_name = 玩具.value
     
-    # 針對不同玩具的特殊反應
+    # 1. 更新數據
+    await db.execute(
+        "INSERT INTO user_stats (user_id, toy_count) VALUES (?, 1) "
+        "ON CONFLICT(user_id) DO UPDATE SET toy_count = toy_count + 1", (user_id,)
+    )
+    row = await db.fetch("SELECT toy_count FROM user_stats WHERE user_id = ?", (user_id,))
+    count = row['toy_count']
+    
+    # 2. 產出反應
     responses = {
         "逗貓棒": "你揮著逗貓棒...本喵的眼睛跟著動了！這、這是本能反應，才不是想玩呢喵！",
         "OO玩具": "你...你這變態雜魚！拿這種東西出來，是想對本喵做什麼壞事嗎喵！(臉紅)",
@@ -1908,42 +2134,431 @@ async def play_toy(interaction: discord.Interaction, 玩具: app_commands.Choice
         "貓草球": "滾來滾去的...好玩！...咳咳，別以為一顆球就能收買本喵，但我還是會陪你玩的喵。"
     }
     
+    # 3. 建立 Embed 並發送
     embed = discord.Embed(
+        title=f"正在玩 {toy_name} 喵！",
         description=responses.get(toy_name, f"你拿著「{toy_name}」...這是什麼新花樣嗎？本喵姑且看一下好了喵。"),
+        color=0xffc0cb
+    )
+    embed.set_footer(text=f"你已經陪本喵玩了 {count} 次玩具囉喵！")
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # 4. 成就判定 (門檻皆改為次數)
+    # 注意：這裡依然可以保留特定成就檢查，因為它們是基於 count 的
+    if count == 20:
+        await check_and_notify_achievement(interaction, "TOY_COLLECTOR", ACHIEVEMENTS["TOY_COLLECTOR"])
+    elif count == 50:
+        await check_and_notify_achievement(interaction, "TOY_MASTER", ACHIEVEMENTS["TOY_MASTER"])
+    
+    # 機率性成就 (各 10%)
+    rand = random.random()
+    if rand < 0.10:
+        await check_and_notify_achievement(interaction, "CATNIP_ADDICT", ACHIEVEMENTS["CATNIP_ADDICT"])
+    elif rand < 0.20:
+        await check_and_notify_achievement(interaction, "REFLEX_TESTER", ACHIEVEMENTS["REFLEX_TESTER"])
+
+@bot.tree.command(name="讓我草草", description="對目標發動突如其來的突襲，把現場搞得亂七八糟！")
+@app_commands.describe(目標="想要進行互動的對象")
+async def razzle(interaction: discord.Interaction, 目標: discord.Member):
+    await interaction.response.defer()
+    user_id = interaction.user.id
+    
+    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await db.execute("INSERT INTO user_stats (user_id, razzle_count) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET razzle_count = razzle_count + 1", (user_id,))
+    
+    row = await db.fetch("SELECT razzle_count FROM user_stats WHERE user_id = ?", (user_id,))
+    count = row['razzle_count'] if row else 1
+    
+    if 目標.id == bot.user.id:
+        responses = [
+            f"欸？{interaction.user.mention} 說什麼呢......太、太突然了喵！(臉紅)",
+            f"這、這種事情......雖然本喵是機器人，但被這樣對待還是會害羞的！(掩面)",
+            f"{interaction.user.mention} 真大膽呢，不過既然是你，本喵就......(臉紅)",
+            f"唔！才剛開機不久就被 {interaction.user.mention} 這樣弄，本喵的系統都亂掉了喵！"
+        ]
+    else:
+        responses = [
+            f"{interaction.user.mention} 突然撲向 {目標.mention}，一陣胡鬧之後，兩人看起來都亂糟糟的呢......(臉紅)",
+            f"{interaction.user.mention} 對 {目標.mention} 發起了攻勢，把對方弄得氣喘吁吁，本喵......(臉紅) 在旁邊看著都害羞了。",
+            f"經過一番激烈的互動，{目標.mention} 已經完全沒力氣了，{interaction.user.mention} 你也太壞心眼了喵！",
+            f"{interaction.user.mention} 毫不留情地把 {目標.mention} 弄得慘兮兮的，本喵......(臉紅) 不小心看了不該看的畫面。",
+            f"{interaction.user.mention} 和 {目標.mention} 鬧成一團，看著對方臉紅的樣子，感覺真是太刺激了喵！",
+            f"{interaction.user.mention} 得逞了！{目標.mention} 現在完全動彈不得，本喵......(臉紅) 也覺得心跳加速呢。"
+        ]
+
+    embed = discord.Embed(description=random.choice(responses), color=0xffc0cb)
+    embed.set_footer(text=f"已完成「草草」次數: {count}")
+    await interaction.followup.send(embed=embed)
+
+    if count == 50: await check_and_notify_achievement(interaction, "RAZZLE_DAZZLE", ACHIEVEMENTS["RAZZLE_DAZZLE"])
+    if random.random() < 0.10: await check_and_notify_achievement(interaction, "CHAOS_AGENT", ACHIEVEMENTS["CHAOS_AGENT"])
+
+@bot.tree.command(name="榨乾", description="對目標進行持續的消耗，直到對方徹底力竭癱軟為止！")
+@app_commands.describe(目標="想要進行互動的對象")
+async def exhaust(interaction: discord.Interaction, 目標: discord.Member):
+    await interaction.response.defer()
+    user_id = interaction.user.id
+    
+    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    await db.execute("INSERT INTO user_stats (user_id, exhaust_count) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET exhaust_count = exhaust_count + 1", (user_id,))
+    
+    row = await db.fetch("SELECT exhaust_count FROM user_stats WHERE user_id = ?", (user_id,))
+    count = row['exhaust_count'] if row else 1
+    
+    if 目標.id == bot.user.id:
+        responses = [
+            f"{interaction.user.mention} 竟然想榨乾本喵？別做夢了，我可是有無限電力的喵！(哼)",
+            f"想要榨乾本喵？{interaction.user.mention} 真是不知好歹呢，看招！(丟出閃電)",
+            f"別、別亂來！本喵的電量可是要留著運作伺服器的，{interaction.user.mention} 這個大笨蛋！",
+            f"嗚......被 {interaction.user.mention} 這樣過度頻繁地存取指令，本喵的 CPU 都要過熱了......(臉紅)",
+            f"住手喵！再這樣下去本喵的系統都要崩潰了，你這傢伙是想把本喵榨乾嗎？(羞)",
+            f"{interaction.user.mention} 你的這種互動方式，讓本喵的處理器運轉速度都變慢了呢......(臉紅)",
+            f"本喵可是機器人，沒有體力可以讓你榨乾的！不過......如果是這種程度的互動，也不是不行......(小聲)",
+            f"感覺數據流都被 {interaction.user.mention} 擾亂了，本喵現在身體軟綿綿的，什麼都做不了了......(臉紅)"
+        ]
+    else:
+        responses = [
+            f"{interaction.user.mention} 湊近了 {目標.mention}，一陣猛烈攻勢，把對方搞得氣喘吁吁，本喵......(臉紅) 也覺得好累。",
+            f"{interaction.user.mention} 徹底把 {目標.mention} 的體力榨乾了！看著對方癱軟的樣子，真是太過分了喵。",
+            f"{interaction.user.mention} 對 {目標.mention} 展開了惡作劇，對方現在連一根手指都動不了了......(臉紅)",
+            f"被 {interaction.user.mention} 這樣折騰，{目標.mention} 已經完全失去力氣了，這可是本喵的傑作喔！",
+            f"{interaction.user.mention} 悄悄地把 {目標.mention} 的體力都吸光了，看著對方虛脫的表情，本喵......(臉紅) 不小心笑出來了。",
+            f"經過一場激烈的消耗，{目標.mention} 已經趴在地上動彈不得，{interaction.user.mention} 卻還是一副精神飽滿的樣子喵。",
+            f"{interaction.user.mention} 讓 {目標.mention} 體力透支，對方臉色潮紅地看著你，場面變得有點混亂了呢......(臉紅)",
+            f"這就是把 {目標.mention} 榨乾的感覺嗎？{interaction.user.mention} 看著對方的反應，忍不住捂住了臉......(羞)",
+            f"{interaction.user.mention} 用盡全力把 {目標.mention} 的力氣都耗盡了，兩人現在都氣喘吁吁的，真是辛苦喵。"
+        ]
+
+    embed = discord.Embed(description=random.choice(responses), color=0xffc0cb)
+    embed.set_footer(text=f"目標已耗盡次數: {count}")
+    await interaction.followup.send(embed=embed)
+
+    if count == 50: await check_and_notify_achievement(interaction, "EXHAUST_MASTER", ACHIEVEMENTS["EXHAUST_MASTER"])
+    if random.random() < 0.10: await check_and_notify_achievement(interaction, "ENERGY_VAMPIRE", ACHIEVEMENTS["ENERGY_VAMPIRE"])
+
+@bot.tree.command(name="廢話", description="本喵來為你說點完全沒用的廢話喵！")
+async def nonsense(interaction: discord.Interaction):
+    await interaction.response.defer()
+    user_id = interaction.user.id
+
+    # 1. 初次互動成就檢查
+    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+
+    # 2. 更新廢話使用次數
+    await db.execute(
+        "INSERT INTO user_stats (user_id, nonsense_count) VALUES (?, 1) "
+        "ON CONFLICT(user_id) DO UPDATE SET nonsense_count = nonsense_count + 1",
+        (user_id,)
+    )
+    
+    # 3. 獲取當前次數
+    row = await db.fetch("SELECT nonsense_count FROM user_stats WHERE user_id = ?", (user_id,))
+    count = row['nonsense_count'] if row else 1
+    
+    # 4. 產出廢話並製作 Embed (統一色碼 0xffc0cb)
+    msg = random.choice(nonsense_responses)
+    embed = discord.Embed(
+        title="本喵的廢話時間喵！",
+        description=msg,
+        color=0xffc0cb
+    )
+    embed.set_footer(text=f"你已經聽了 {count} 次本喵的廢話囉喵！")
+    
+    # 5. 回應訊息
+    await interaction.followup.send(embed=embed)
+    
+    # 6. 門檻成就判定
+    if count == 50:
+        await check_and_notify_achievement(interaction, "TRASH_LISTENER", ACHIEVEMENTS["TRASH_LISTENER"])
+    elif count == 100:
+        await check_and_notify_achievement(interaction, "TRASH_SCHOLAR", ACHIEVEMENTS["TRASH_SCHOLAR"])
+    elif count == 200:
+        await check_and_notify_achievement(interaction, "TRASH_ADDICT", ACHIEVEMENTS["TRASH_ADDICT"])
+    elif count == 500:
+        await check_and_notify_achievement(interaction, "TRASH_TRANSCENDENT", ACHIEVEMENTS["TRASH_TRANSCENDENT"])
+    
+    # 7. 機率性成就判定
+    rand = random.random()
+    if rand < 0.075:
+        await check_and_notify_achievement(interaction, "TRASH_LISTENER_LUCKY", ACHIEVEMENTS["TRASH_LISTENER_LUCKY"])
+    elif rand < 0.15:
+        await check_and_notify_achievement(interaction, "TRASH_ENLIGHTENED", ACHIEVEMENTS["TRASH_ENLIGHTENED"])
+    elif rand < 0.225:
+        await check_and_notify_achievement(interaction, "TRASH_BLESSED", ACHIEVEMENTS["TRASH_BLESSED"])
+    elif rand < 0.30:
+        await check_and_notify_achievement(interaction, "TRASH_POISON", ACHIEVEMENTS["TRASH_POISON"])
+
+@bot.tree.command(name="摸摸頭", description="給予目標溫暖的摸摸頭！")
+@app_commands.describe(目標="想要摸摸頭的對象")
+async def pat(interaction: discord.Interaction, 目標: discord.Member):
+    # 判斷回應內容
+    if 目標 == interaction.user:
+        desc = f"{interaction.user.mention} 摸了摸自己的頭，辛苦了！"
+    elif 目標.id == bot.user.id:
+        desc = f"{interaction.user.mention} 摸了摸頭，感覺很舒服喵！(〃∀〃)"
+    else:
+        desc = f"{interaction.user.mention} 輕輕摸了摸 {目標.mention} 的頭！"
+
+    # 建立嵌入式訊息
+    embed = discord.Embed(description=desc, color=0xffc0cb)
+    
+    # 發送回應
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="會考資源", description="整理好的歷屆試題與線上測驗資源喵！")
+async def exam_resources(interaction: discord.Interaction):
+    description = (
+        "幫你整理了各種資源，要認真點別當雜魚喵：\n\n"
+        "**【官方與題庫下載】**\n"
+        "• [國中教育會考官網 - 歷屆試題](https://cap.rcpet.edu.tw/Examination.html)\n"
+        "• [國家教育研究院 - 教育會考題庫](https://exam.naer.edu.tw/)\n"
+        "• [台灣測驗中心 - 歷屆試題下載](https://www.testcenter.org.tw/)\n\n"
+        "**【線上模擬與練習】**\n"
+        "• [StudyBank - 會考考古題專區](https://www.studybank.com.tw/exam/cap/questions)\n"
+        "• [翰林雲端學院 - 會考線上測驗](https://www.ehanlin.com.tw/exam/cap.html)\n"
+        "• [南一書局 - 線上題庫練習](https://www.nani.com.tw/)\n\n"
+        "**【高效率學習頻道】**\n"
+        "• [均一教育平台 - 會考複習](https://www.junyiacademy.org/)\n"
+        "• [考前衝刺 - 學習吧](https://www.learnmode.net/)\n"
+        "• [Youtube - 數學名師頻道](https://www.youtube.com/@math-tw)\n"
+        "• [Youtube - 國文名師頻道](https://www.youtube.com/@chinese-tw)"
+    )
+    
+    embed = discord.Embed(
+        title="會考歷屆試題與學習資源",
+        description=description,
         color=0xffc0cb
     )
     await interaction.response.send_message(embed=embed)
 
-# 堵住嘴巴
-@bot.tree.command(name="堵住嘴巴", description="強制讓目標閉嘴喵！")
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mute_user(interaction: discord.Interaction, 目標: discord.Member, 時間: int, 單位: str):
-    units = {'s': 1, 'min': 60, 'hr': 3600, 'day': 86400, 'week': 604800}
-    if 單位 not in units:
-        await interaction.response.send_message("單位錯誤喵！", ephemeral=True)
-        return
-    await 目標.timeout(datetime.timedelta(seconds=時間 * units[單位]))
-    embed = discord.Embed(description=f"🤐 {目標.mention} 被堵住嘴巴 {時間}{單位} 喵！", color=0xff0000)
-    await interaction.response.send_message(embed=embed)
+class WordView(discord.ui.View):
+    def __init__(self, data_list, user_id):
+        super().__init__(timeout=None)
+        self.data_list = data_list
+        self.user_id = user_id
+        self.current_page = 0
+        self.total_pages = len(data_list)
+        self.update_buttons()
 
-# 解除禁言
-@bot.tree.command(name="解除禁言", description="解除目標的禁言狀態喵！")
-@app_commands.checks.has_permissions(moderate_members=True)
-async def unmute_user(interaction: discord.Interaction, 目標: discord.Member):
-    await 目標.timeout(None)
-    embed = discord.Embed(description=f"✨ {目標.mention} 的嘴巴解放了喵。", color=0xffff00)
-    await interaction.response.send_message(embed=embed)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 這不是你的單字卡，請使用 /英單字卡 指令建立自己的。", ephemeral=True)
+            return False
+        return True
 
-# 自我禁閉
-@bot.tree.command(name="自我禁閉", description="自己把自己關起來反省喵！")
-async def self_mute(interaction: discord.Interaction, 時間: int, 單位: str):
-    units = {'s': 1, 'min': 60, 'hr': 3600, 'day': 86400}
-    if 單位 not in units:
-        await interaction.response.send_message("單位錯誤喵！", ephemeral=True)
-        return
-    await interaction.user.timeout(datetime.timedelta(seconds=min(時間 * units[單位], 86400)))
-    embed = discord.Embed(description=f"🔒 {interaction.user.mention} 把自己關起來了，反省去吧喵。", color=0x4169e1)
-    await interaction.response.send_message(embed=embed)
+    def update_buttons(self):
+        # 設定按鈕狀態與顏色
+        self.prev_button.disabled = (self.current_page <= 0)
+        self.prev_button.style = discord.ButtonStyle.secondary
+        
+        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
+        self.next_button.style = discord.ButtonStyle.secondary
+        
+        self.jump_button.style = discord.ButtonStyle.primary
+
+    def get_embed(self):
+        word, definition = self.data_list[self.current_page]
+        embed = discord.Embed(title=f"單字: {word}", description=f"定義: {definition}")
+        embed.set_footer(text=f"第 {self.current_page + 1} / {self.total_pages} 個")
+        return embed
+
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary, custom_id="prev", row=0)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary, custom_id="next", row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="🔢 單字頁面跳轉", style=discord.ButtonStyle.primary, custom_id="jump", row=1)
+    async def jump_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(JumpModal(self))
+
+    async def refresh(self, interaction: discord.Interaction):
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+@bot.tree.command(name="英單字卡", description="獲取單字卡")
+async def english_cards(interaction: discord.Interaction):
+    await interaction.response.defer() 
+    
+    data_list = list(WORDS_DATA.items())
+    # 傳入 interaction.user.id
+    view = WordView(data_list, user_id=interaction.user.id)
+    await interaction.followup.send(embed=view.get_embed(), view=view)
+
+@bot.tree.command(name="刪除資料", description="清除你的個人統計資料")
+@app_commands.describe(data_type="選擇要刪除的資料類別 (全部/成就/統計/生日)")
+@app_commands.choices(data_type=[
+    app_commands.Choice(name="全部", value="all"),
+    app_commands.Choice(name="成就", value="achievements"),
+    app_commands.Choice(name="統計", value="logs"),
+    app_commands.Choice(name="生日", value="birthdays")
+])
+# 移除 "= 'all'" 預設值，使參數成為必要
+async def delete_data(interaction: discord.Interaction, data_type: str):
+    user_id = interaction.user.id
+    
+    # 定義中文映射
+    type_names = {
+        "all": "所有相關資料",
+        "achievements": "成就紀錄",
+        "logs": "統計數據",
+        "birthdays": "生日設定"
+    }
+    
+    try:
+        # 根據選擇的類別執行對應的 DELETE
+        if data_type == "all" or data_type == "achievements":
+            await db.execute("DELETE FROM user_achievements WHERE user_id = ?", (user_id,))
+        
+        if data_type == "all" or data_type == "logs":
+            await db.execute("DELETE FROM user_logs WHERE user_id = ?", (user_id,))
+            
+        if data_type == "all" or data_type == "birthdays":
+            await db.execute("DELETE FROM user_birthdays WHERE user_id = ?", (user_id,))
+        
+        # 確認執行結果
+        await interaction.response.send_message(
+            f"喵！已成功清除你的 **{type_names.get(data_type, data_type)}**。", 
+            ephemeral=True
+        )
+        
+    except Exception as e:
+        await interaction.response.send_message(f"喵... 刪除過程中發生了錯誤，請再試一次喵：{e}", ephemeral=True)
+
+class PermissionPaginationView(discord.ui.View):
+    def __init__(self, pages):
+        super().__init__(timeout=60)
+        self.pages = pages
+        self.current_page = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        # 上一頁：第一頁時禁用並變灰
+        self.prev_page.disabled = (self.current_page == 0)
+        self.prev_page.style = discord.ButtonStyle.secondary if self.prev_page.disabled else discord.ButtonStyle.primary
+        
+        # 下一頁：最後一頁時禁用並變灰
+        self.next_page.disabled = (self.current_page == len(self.pages) - 1)
+        self.next_page.style = discord.ButtonStyle.secondary if self.next_page.disabled else discord.ButtonStyle.primary
+
+    def get_embed(self):
+        return discord.Embed(
+            description=f"本喵的權限檢查報告 ({self.current_page + 1}/{len(self.pages)}) 喵：\n\n{self.pages[self.current_page]}",
+            color=0xffc0cb
+        )
+
+    @discord.ui.button(label="上一頁")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @discord.ui.button(label="下一頁")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+class PermissionPaginationView(discord.ui.View):
+    def __init__(self, pages):
+        super().__init__(timeout=60)
+        self.pages = pages
+        self.current_page = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        # 上一頁：第一頁時禁用並變灰
+        self.prev_page.disabled = (self.current_page == 0)
+        self.prev_page.style = discord.ButtonStyle.secondary if self.prev_page.disabled else discord.ButtonStyle.primary
+        
+        # 下一頁：最後一頁時禁用並變灰
+        self.next_page.disabled = (self.current_page == len(self.pages) - 1)
+        self.next_page.style = discord.ButtonStyle.secondary if self.next_page.disabled else discord.ButtonStyle.primary
+
+    def get_embed(self):
+        return discord.Embed(
+            description=f"本喵的權限檢查報告 ({self.current_page + 1}/{len(self.pages)}) 喵：\n\n{self.pages[self.current_page]}",
+            color=0xffc0cb
+        )
+
+    @discord.ui.button(label="上一頁")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @discord.ui.button(label="下一頁")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+@bot.tree.command(name="權限檢查", description="檢查本喵在此伺服器的所有權限喵！")
+async def check_permissions(interaction: discord.Interaction):
+    perms = interaction.guild.me.guild_permissions
+    
+    perm_map = {
+        "administrator": "管理者", "manage_guild": "管理伺服器", "view_audit_log": "檢視審核紀錄",
+        "view_channel": "檢視頻道", "manage_channels": "管理頻道", "manage_roles": "管理身分組",
+        "manage_emojis_and_stickers": "管理表情符號與貼圖", "manage_webhooks": "管理 Webhooks",
+        "view_guild_insights": "檢視伺服器分析", "manage_messages": "管理訊息",
+        "send_messages": "發送訊息", "embed_links": "嵌入連結", "attach_files": "附件檔案",
+        "read_message_history": "讀取訊息紀錄", "mention_everyone": "提及 @everyone",
+        "use_external_emojis": "使用外部表情符號", "add_reactions": "新增反應",
+        "connect": "連接語音", "speak": "語音發言", "mute_members": "靜音成員",
+        "deafen_members": "取消成員聽力", "move_members": "移動成員", "use_voice_activation": "語音活動",
+        "manage_nicknames": "管理暱稱", "manage_events": "管理活動", "moderate_members": "審核成員",
+        "request_to_speak": "要求發言", "create_instant_invite": "建立邀請", "kick_members": "踢出成員",
+        "ban_members": "封鎖成員", "change_nickname": "更改暱稱", "send_messages_in_threads": "在討論串發言",
+        "create_public_threads": "建立公開討論串", "create_private_threads": "建立私人討論串",
+        "send_tts_messages": "發送語音訊息", "use_application_commands": "使用應用程式指令"
+    }
+
+    # 產生帶有間距的清單
+    status_list = []
+    # perms 本身是 Permissions 物件，需使用 iter(perms) 或直接存取
+    for name, value in perms:
+        display_name = perm_map.get(name, name.replace('_', ' ').title())
+        icon = "✅" if value else "❌"
+        # 這裡加入 \u200B 撐開間距
+        status_list.append(f"{icon} {display_name}\n\u200B")
+    
+    # 每頁 10 項
+    pages = ["".join(status_list[i:i + 10]) for i in range(0, len(status_list), 10)]
+    
+    view = PermissionPaginationView(pages)
+    await interaction.response.send_message(embed=view.get_embed(), view=view)
+
+@bot.tree.command(name="踢出", description="踢出伺服器成員喵！")
+@app_commands.describe(成員="要踢出的成員", 原因="踢出的原因")
+async def kick_member(interaction: discord.Interaction, 成員: discord.Member, 原因: str = "無"):
+    # 權限檢查：開發者無需檢查；其他人須具備踢人權限
+    if interaction.user.id != DEVELOPER_ID:
+        if not interaction.user.guild_permissions.kick_members:
+            return await interaction.response.send_message("喵？你沒有權限使用這個功能喔！", ephemeral=True)
+    
+    # 本體權限檢查
+    if not interaction.guild.me.guild_permissions.kick_members:
+        return await interaction.response.send_message("喵...本喵沒有踢出成員的權限！", ephemeral=True)
+    
+    # 防止踢出擁有更高權限的人
+    if 成員.top_role >= interaction.guild.me.top_role:
+        return await interaction.response.send_message("這傢伙地位太高了，本喵踢不動喵！", ephemeral=True)
+
+    try:
+        await 成員.kick(reason=原因)
+        embed = discord.Embed(
+            description=f"✅ 已成功將 {成員.mention} 踢出伺服器喵！\n原因：{原因}",
+            color=0xffc0cb
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"踢出失敗了喵...錯誤代碼：{e}", ephemeral=True)
 
 @bot.tree.command(name="重置暱稱", description="[限管] 強制將機器人暱稱重置為空（即顯示原始名稱）")
 @admin_or_dev_only
@@ -1955,91 +2570,100 @@ async def reset_bot_nick(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ 重置失敗：{e}", ephemeral=True)
 
-@bot.tree.command(name="頂號", description="管理員/開發者專用公告指令")
-@app_commands.describe(
-    訊息="要發送的內容", 
-    是否使用嵌入式訊息="T為Embed，F為純文字",
-    標記類型="選擇要標記的對象"
-)
-@app_commands.choices(標記類型=[
-    app_commands.Choice(name="無", value="none"),
-    app_commands.Choice(name="@everyone", value="everyone"),
-    app_commands.Choice(name="@here", value="here")
-])
-async def broadcast(
-    interaction: discord.Interaction, 
-    訊息: str, 
-    是否使用嵌入式訊息: bool,
-    標記類型: app_commands.Choice[str]
-):
-    # 權限判定：是開發者 OR 是管理員
-    is_admin = interaction.user.guild_permissions.administrator
-    if interaction.user.id != DEVELOPER_ID and not is_admin:
-        return await interaction.response.send_message("你不是管理員或開發者，滾開喵！", ephemeral=True)
-
-    # 處理 Mention 語法
-    mention_content = ""
-    if 標記類型.value == "everyone":
-        mention_content = "@everyone"
-    elif 標記類型.value == "here":
-        mention_content = "@here"
-
-    # 發送訊息
-    author_text = f"\n\n— 由 {interaction.user.display_name} 發送"
+@bot.tree.command(name="help", description="顯示功能說明書")
+async def help(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📜 雜魚小貓娘 | 功能說明書", 
+        description="本喵負責娛樂、數據檢測與防禦保護。", 
+        color=0xffc0cb
+    )
     
-    if 是否使用嵌入式訊息:
-        embed = discord.Embed(title="📢 公告", description=訊息, color=0xffc0cb)
-        embed.set_footer(text=f"發送者: {interaction.user.display_name}")
-        await interaction.channel.send(content=mention_content, embed=embed)
-    else:
-        final_msg = f"{mention_content}\n{訊息}{author_text}" if mention_content else f"{訊息}{author_text}"
-        await interaction.channel.send(final_msg)
+    embed.add_field(name="🛡️ 防禦與保護 (限管)", value=(
+        "• **/保護等級**：設定頻道防炸強度。\n"
+        "• **/關鍵詞檢測**：切換敏感詞攔截系統。\n"
+        "• **/重置暱稱**：還原本喵暱稱設定。\n"
+        "• **/踢出**：快速移除惡意或違規成員。"
+    ), inline=False)
+    
+    embed.add_field(name="🛠️ 實用工具", value=(
+        "• **/ai**：深度邏輯對話與分析。\n"
+        "• **/翻譯**：多國語言即時轉換。\n"
+        "• **/狀態監測**：查看伺服器與機器人負載。\n"
+        "• **/ping**：API 連線延遲檢測。\n"
+        "• **/刪除我的統計**：清除互動統計數據。"
+    ), inline=False)
+    
+    embed.add_field(name="🎮 娛樂與互動", value=(
+        "• **/game_2048**：2048 益智遊戲。\n"
+        "• **/game_memory**：記憶翻牌挑戰。\n"
+        "• **/game_ooxx**：3x3/5x5 圈圈叉叉對戰。\n"
+        "• **/ooxx_rank**：查看勝場與連勝榜。\n"
+        "• **/你知道嗎**：隨機冷知識。\n"
+        "• **/小提示**：操作技巧或廢話。\n"
+        "• **/廢話**：聽本喵說廢話。\n"
+        "• **/餵食**：給予本喵貢品。\n"
+        "• **/猜拳**：跟本喵一決高下。\n"
+        "• **/求籤/祈福**：每日運勢與祈福。\n"
+        "• **/36計**：今日錦囊妙計。\n"
+        "• **/尋找色色群主**：呼叫色色的星音群主。\n"
+        "• **/摸摸頭**：摸摸頭互動。\n"
+        "• **/榨乾/讓我草草**：惡搞互動。\n"
+        "• **/本喵要玩玩具**：逗本喵互動。\n"
+        "• **/看雜魚小貓娘/逆天圖片**：私藏圖庫。\n"
+        "• **/各類指數**：鑑定屬性、性格、智商與數值。"
+    ), inline=False)
+    
+    embed.add_field(name="🎂 生日與成就", value=(
+        "• **/成就百科**：解鎖清單與隱藏提示。\n"
+        "• **/設定生日頻道**：設定生日公告頻道。\n"
+        "• **/生日設定/隱私權/倒數**：生日紀錄與驚喜。"
+    ), inline=False)
+    
+    embed.add_field(name="⚡ 自動觸發系統", value=(
+        "• 關鍵詞互動：觸發特定詞可獲得隱藏成就與回覆。"
+    ), inline=False)
+    
+    embed.set_footer(text=f"💡 {random.choice(TIPS)} | 最後更新: 2026-06-14")
+    await interaction.response.send_message(embed=embed)
 
 # ==================== 開發者專用指令  ====================
 
 @bot.tree.command(name="關機", description="強制關閉機器人視窗 (限開發者)")
 async def shutdown(interaction: discord.Interaction):
     if interaction.user.id != DEVELOPER_ID:
-        return await interaction.response.send_message("❌ 該指令僅限開發者使用。", ephemeral=True)
+        return await interaction.response.send_message("走開，只有本喵的開發者能用喵！", ephemeral=True)
     
     embed = discord.Embed(
-        title="系統關機中...",
-        description="本喵要下線休息並關閉視窗了，雜魚們再見喵！(,,・ω・,,)🐾",
+        title="系統關機",
+        description="本喵要下線休息並關閉視窗了，雜魚們再見！",
         color=0xffc0cb
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
     
-    print("機器人正在強制關閉中...")
-    # 強制終止當前進程，這會直接關閉終端機視窗
+    await asyncio.sleep(1)
     os._exit(0)
 
 @bot.tree.command(name="重啟", description="強制重啟機器人 (限開發者)")
 async def restart(interaction: discord.Interaction):
     if interaction.user.id != DEVELOPER_ID:
-        return await interaction.response.send_message("❌ 該指令僅限開發者使用。", ephemeral=True)
-    
-    global is_ready
-    is_ready = False
+        return await interaction.response.send_message("走開，只有本喵的開發者能用喵！", ephemeral=True)
     
     embed = discord.Embed(
-        title="系統重啟中...",
-        description="正在關閉視窗並重啟，請稍候喵... (๑•́ ₃ •̀๑)",
-        color=0x87ceeb
+        title="系統重啟",
+        description="正在關閉視窗並重啟程式，請稍候...",
+        color=0xffc0cb
     )
     await interaction.response.send_message(embed=embed, ephemeral=False)
     
-    # 【核心修正】：獲取當前執行腳本的目錄，確保新視窗在正確位置啟動
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if hasattr(db, 'close'):
+        await db.close()
+    
     script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    cmd = f'start wt -d "{script_dir}" cmd /k "{sys.executable}" "{script_path}"'
+    subprocess.Popen(cmd, shell=True)
     
-    # 指令改為：進入正確路徑，然後執行 Python
-    cmd_command = f"cd /d \"{script_dir}\" && chcp 65001 >nul && {sys.executable} \"{script_path}\""
-    
-    subprocess.Popen(
-        ['wt', 'cmd', '/k', cmd_command],
-        creationflags=subprocess.CREATE_NEW_CONSOLE
-    )
-    
+    await asyncio.sleep(1)
     os._exit(0)
 
 @bot.tree.command(name="開發者重置統計", description="[開發者專用] 強制重置指定用戶的統計數據")
@@ -2063,8 +2687,8 @@ async def dev_reset_stats(interaction: discord.Interaction, target: discord.User
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    if member.guild.id == 1493902370013188221:
-        channel = bot.get_channel(1493902370013188221)
+    if member.guild.id == 1497761780393578496:
+        channel = bot.get_channel(1497761780393578496)
         if channel:
             embed = discord.Embed(
                 title="✨ 新成員加入喵！",
@@ -2076,8 +2700,8 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    if member.guild.id == 1493902370013188221:
-        channel = bot.get_channel(1493902370013188221)
+    if member.guild.id == 1497761780393578496:
+        channel = bot.get_channel(1497761780393578496)
         if channel:
             embed = discord.Embed(
                 title="👋 成員離開喵...",
@@ -2087,79 +2711,67 @@ async def on_member_remove(member: discord.Member):
             embed.set_thumbnail(url=member.display_avatar.url)
             await channel.send(embed=embed)
 
+# 統一互動處理邏輯
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # 監聽點擊排行榜按鈕
-    if interaction.data.get("custom_id") == "bingo_rank_btn":
-        # 這裡會觸發你原本的 bingo_rank 指令函式
-        await bingo_rank(interaction)
+    # 1. 全域成就檢查
+    await trigger_first_interaction_check(interaction)
     
-    # 如果有其他互動 (例如原本的 slash command)，交給 tree 去處理
+    # 2. 元件互動處理 (按鈕等)
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id")
+        if custom_id == "ooxx_rank_btn": # 已修正為 ooxx
+            await ooxx_rank(interaction)
+        # 若有其他按鈕邏輯可繼續擴充
+        else:
+            await bot.tree.on_interaction(interaction)
+            
+    # 3. 斜線指令處理
     else:
         await bot.tree.on_interaction(interaction)
 
-@bot.event
-async def on_app_command_completion(interaction: discord.Interaction, command):
-    # 定義不觸發成就的工具/管理指令名稱
-    ignored_commands = [
-        "ping", 
-        "狀態監測", 
-        "關鍵詞檢測", 
-        "重置暱稱", 
-        "刪除資料", 
-        "成就", 
-        "設定生日", 
-        "生日倒數", 
-        "生日隱私權"
-        "刪除我的計數",
-        "刪除統計",
-    ]
-    
-    # 只要不在排除名單內，就觸發初次互動成就
-    if command.name not in ignored_commands:
-        await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+# 每日推播邏輯優化
+@tasks.loop(time=datetime_time(hour=8, minute=0, tzinfo=timezone(timedelta(hours=8))))
+async def daily_countdown():
+    channel = bot.get_channel(1497761780393578496)
+    if channel:
+        target = get_next_exam_date()
+        days_left = (target - datetime.now()).days
+        # 使用 Embed 統一風格
+        embed = discord.Embed(
+            description=f"早安！距離 {target.year} 年會考還有 **{days_left}** 天，請保持專注喵。",
+            color=0xffc0cb
+        )
+        await channel.send(embed=embed)
 
-@bot.event
-async def on_shutdown():
-    await db.close()
-
+# 啟動與維護邏輯
 async def start_bot_with_recovery():
     while True:
         try:
             await db.setup()
             print("✅ 資料庫已就緒")
-            break # 成功則跳出迴圈
+            break
         except Exception as e:
             print(f"\n❌ 資料庫錯誤: {e}")
-            print("\n請選擇操作:")
-            print("1) 再試一次 (Retry)")
-            print("2) 關閉程式 (Exit)")
-            choice = input("輸入選項數字: ")
-            
-            if choice == '2':
-                print("程式已關閉。")
-                sys.exit()
-            else:
-                print("正在嘗試重新連線...")
-                await asyncio.sleep(2)
+            # 為保持效率，直接簡化流程
+            await asyncio.sleep(5)
+            print("正在嘗試重新連線...")
 
 async def main():
-    # 確保資料庫只初始化一次
-    await db.setup()
-    
     if not TOKEN:
         print("❌ 錯誤：TOKEN 為空，請檢查 .env 檔案。")
         return
     print(f"🚀 正在嘗試連線至 Discord")
-    # 這裡確保指令同步
     async with bot:
         await bot.start(TOKEN)
 
 if __name__ == "__main__":
     try:
+        # 確保資料庫先行初始化
+        asyncio.run(start_bot_with_recovery())
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 程式已由使用者手動停止。")
     finally:
-        # 確保關閉資料庫，不要讓檔案鎖死
+        # 確保關閉資料庫
         asyncio.run(db.close())
