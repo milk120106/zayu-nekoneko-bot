@@ -47,7 +47,3 @@
 功能申請 & BUG反饋：https://github.com/milk120106/zayu-nekoneko-bot/issues
 
 注意事項：本機器人經常且不定期的更新，很多功能加入後會不能使用、有bug或在多次更新中被刪除/註釋
-
----
-
-(開發者ps：我很久才會更新一次倉庫)
