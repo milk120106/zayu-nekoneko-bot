@@ -32,10 +32,7 @@
 
 ## 開發者
 *   **開發者**：milk120106
-*   **授權**：MIT License (或其他你採用的協議)
-
-## 更新日誌
-* https://github.com/milk120106/zayu-nekoneko-bot/blob/df78a263a61556df41ab2e23116c23a41ff6128b/Changelog.md
+*   **授權**：MIT License
 
 ---
-由 milk120106 開發 (我很久才會更新一次倉庫)
+(開發者ps：我很久才會更新一次倉庫)
