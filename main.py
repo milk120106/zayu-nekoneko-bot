@@ -2690,6 +2690,28 @@ async def reset_bot_nick(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ 重置失敗：{e}", ephemeral=True)
 
+@bot.tree.command(name="會考倒數頻道", description="設定每日會考倒數的目標頻道")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_countdown_channel(interaction: discord.Interaction, 頻道: discord.TextChannel):
+    await db.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        ("countdown_channel_id", str(頻道.id))
+    )
+    await interaction.response.send_message(f"設定成功！每日會考倒數將會在 {頻道.mention} 發送喵。", ephemeral=True)
+
+@bot.tree.command(name="會考倒數開關", description="開啟或關閉每日會考倒數功能")
+@app_commands.checks.has_permissions(administrator=True)
+async def toggle_countdown(interaction: discord.Interaction, 狀態: str):
+    if 狀態.lower() not in ["on", "off"]:
+        return await interaction.response.send_message("格式錯誤！請輸入 on 或 off 喵。", ephemeral=True)
+    
+    await db.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        ("countdown_enabled", 狀態.lower())
+    )
+    status_text = "開啟" if 狀態.lower() == "on" else "關閉"
+    await interaction.response.send_message(f"會考倒數功能已{status_text}喵。", ephemeral=True)
+
 @bot.tree.command(name="help", description="顯示功能說明書")
 async def help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -2708,6 +2730,9 @@ async def help(interaction: discord.Interaction):
     embed.add_field(name="🛠️ 實用工具", value=(
         "• **/ai**：深度邏輯對話與分析。\n"
         "• **/翻譯**：多國語言即時轉換。\n"
+        "• **/英單字卡**：英語詞彙學習輔助。\n"
+        "• **/會考倒數頻道**：設定每日倒數頻道 (限管)。\n"
+        "• **/會考倒數開關**：切換倒數功能狀態 (限管)。\n"
         "• **/狀態監測**：查看伺服器與機器人負載。\n"
         "• **/ping**：API 連線延遲檢測。\n"
         "• **/刪除我的統計**：清除互動統計數據。"
@@ -2743,7 +2768,7 @@ async def help(interaction: discord.Interaction):
         "• 關鍵詞互動：觸發特定詞可獲得隱藏成就與回覆。"
     ), inline=False)
     
-    embed.set_footer(text=f"💡 {random.choice(TIPS)} | 最後更新: 2026-06-14")
+    embed.set_footer(text=f"💡 {random.choice(TIPS)} | 最後更新: 2026-06-15")
     await interaction.response.send_message(embed=embed)
 
 # ==================== 開發者專用指令  ====================
@@ -2852,22 +2877,29 @@ async def on_interaction(interaction: discord.Interaction):
 
 @tasks.loop(time=datetime_time(hour=7, minute=0, tzinfo=taipei_tz))
 async def daily_countdown():
-    channel = bot.get_channel(1493902370013188221)
+    # 檢查開關狀態
+    enabled = await db.fetch_val("SELECT value FROM settings WHERE key = 'countdown_enabled'")
+    if enabled != 'on':
+        return
+
+    # 獲取頻道 ID
+    channel_id = await db.fetch_val("SELECT value FROM settings WHERE key = 'countdown_channel_id'")
+    if not channel_id:
+        return
+        
+    channel = bot.get_channel(int(channel_id))
     if channel:
         target = get_next_exam_date()
-        
-        # 1. 確保兩個時間都是帶有台北時區的對象，避免減法報錯
         now = datetime.now(taipei_tz)
-        
-        # 2. 如果 target 沒有時區，賦予它台北時區
         if target.tzinfo is None:
             target = target.replace(tzinfo=taipei_tz)
             
-        # 3. 計算剩餘天數 (使用 .days 會向下取整，建議視需求用 ceil)
-        days_left = (target - now).days
+        delta = target - now
+        days_left = delta.days + (1 if delta.seconds > 0 else 0)
+        roc_year = target.year - 1911
         
         embed = discord.Embed(
-            description=f"早安！距離 {target.year} 年會考還有 **{days_left}** 天，請保持專注喵。",
+            description=f"早安！距離 {roc_year} 年會考還有 **{days_left}** 天，請保持專注喵。",
             color=0xffc0cb
         )
         await channel.send(embed=embed)
