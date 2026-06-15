@@ -1,34 +1,38 @@
+import time
+import io
+import re
 import os
 import sys
 import json
-import random
 import asyncio
 import psutil
 import discord
 import aiosqlite
 import sqlite3
 import subprocess
-import io
-import time as time_lib  # 用於計算耗時
-import re
-from datetime import datetime, time as datetime_time, timezone, timedelta
-from collections import defaultdict
+import requests
+import base64
+import time as time_lib
 from typing import Union, Optional
 from functools import wraps
-import string # 必須補充 import
-# from discord import ui # 必須補充 import
-from functools import wraps
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+from datetime import time as datetime_time
 
-# AI 與 API 相關
+# 第三方套件
+from openai import OpenAI
 from litellm import acompletion
 from dotenv import load_dotenv
-
-# 翻譯相關
-from deep_translator import GoogleTranslator, MyMemoryTranslator
-
-# Discord 相關
+from deep_translator import (
+    GoogleTranslator, 
+    MyMemoryTranslator, 
+    LibreTranslator, 
+    PonsTranslator, 
+    LingueeTranslator
+)
 from discord import app_commands, ui
 from discord.ext import commands, tasks
+from PIL import Image
 
 load_dotenv()
 
@@ -46,12 +50,17 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 game_states = {}
 usage_history = {} # 在全域宣告
 
+# 定義台北時區
+taipei_tz = timezone(timedelta(hours=8))
+
 DEVELOPER_ID = 1317882602392260632
 TARGET_USER_1 = 1373592542406508646
 TARGET_USER_2 = 1277791709563981928
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNIFE_IMAGE_PATH = os.path.join(BASE_DIR, "images", "knife.png")
 CATGIRL_IMAGE_PATH = os.path.join(BASE_DIR, "images", "catgirl.jpg")
+
+MODEL_CACHE = []
 
 file_path = "words.json"
 WORDS_DATA = {}
@@ -314,6 +323,7 @@ class DatabaseManager:
                 "CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, birthday_channel_id INTEGER)",
                 "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, guild_id INTEGER, exp INTEGER DEFAULT 0)",
                 "CREATE TABLE IF NOT EXISTS user_birthdays (user_id INTEGER PRIMARY KEY, birthday TEXT, privacy INTEGER DEFAULT 0)",
+                "CREATE TABLE IF NOT EXISTS user_stats (user_id INTEGER PRIMARY KEY, razzle_count INTEGER DEFAULT 0, exhaust_count INTEGER DEFAULT 0)",
                 """CREATE TABLE IF NOT EXISTS user_logs (
                     user_id INTEGER, 
                     action TEXT, 
@@ -490,41 +500,43 @@ def get_system_stats():
         "mem_total": round(mem.total / (1024**3), 2)
     }
 
+def create_embed(description):
+    embed = discord.Embed(description=description, color=discord.Color.blue())
+    return embed
+
 MODEL_CHOICES = [
-    # Google Gemini 系列 (文字/多模態)
+    # --- Google Gemini 系列 ---
     app_commands.Choice(name="Gemini 3 Flash", value="gemini/gemini-3-flash"),
     app_commands.Choice(name="Gemini 2.5 Flash", value="gemini/gemini-2.5-flash"),
     app_commands.Choice(name="Gemini 2.5 Flash Lite", value="gemini/gemini-2.5-flash-lite"),
     app_commands.Choice(name="Gemma 4 26B", value="gemini/gemma-4-26b"),
     app_commands.Choice(name="Gemma 4 31B", value="gemini/gemma-4-31b"),
+    app_commands.Choice(name="Gemini 1.5 Pro", value="gemini/gemini-1.5-pro"),
+    app_commands.Choice(name="Gemini 1.5 Flash", value="gemini/gemini-1.5-flash"),
 
-    # Google Imagen 系列 (圖片生成)
-    app_commands.Choice(name="Imagen 4 Ultra", value="google/imagen-4-ultra"),
-    app_commands.Choice(name="Imagen 4 Generate", value="google/imagen-4"),
-    app_commands.Choice(name="Imagen 4 Fast", value="google/imagen-4-fast"),
-
-    # Embedding 系列 (注意：這些不適用於 chat 互動)
-    app_commands.Choice(name="Gemini Embedding 2", value="text-embedding-005"),
-    app_commands.Choice(name="Gemini Embedding 1", value="text-embedding-004"),
-
-    # Groq 系列
+    # --- Groq 系列 ---
     app_commands.Choice(name="Llama 3.3 70B (Groq)", value="groq/llama-3.3-70b-versatile"),
     app_commands.Choice(name="Llama 3.1 8B (Groq)", value="groq/llama-3.1-8b-instant"),
     app_commands.Choice(name="Mixtral 8x7B (Groq)", value="groq/mixtral-8x7b-32768"),
     app_commands.Choice(name="Gemma 2 9B (Groq)", value="groq/gemma-2-9b-it"),
-    
-    # HuggingFace 系列
-    app_commands.Choice(name="Mistral Small 24B (HF)", value="huggingface/mistralai/Mistral-Small-24B-Instruct-2501"),
-    app_commands.Choice(name="Llama 3.1 8B (HF)", value="huggingface/meta-llama/Llama-3.1-8B-Instruct")
-]
+    app_commands.Choice(name="Llama 3.1 70B (Groq)", value="groq/llama-3.1-70b-versatile"),
+    app_commands.Choice(name="Llama 3.2 11B (Groq)", value="groq/llama-3.2-11b-vision-preview"),
+    app_commands.Choice(name="Qwen 2.5 Coder 32B (Groq)", value="groq/qwen-2.5-coder-32b"),
+    app_commands.Choice(name="Llama 3.2 3B (Groq)", value="groq/llama-3.2-3b-preview"),
+    app_commands.Choice(name="Mistral 7B (Groq)", value="groq/mistral-7b-instruct-v0.3"),
+    app_commands.Choice(name="Llama 3.3 70B (Groq Direct)", value="groq/llama-3.3-70b-specdec"),
 
-# 所有模型失敗時輪詢清單
-dynamic_fallbacks = [
-    "gemini/gemini-3-flash",
-    "gemini/gemini-2.5-flash",
-    "gemini/gemini-3.1-flash-lite",
-    "groq/llama-3.3-70b-versatile",
-    "huggingface/mistralai/Mistral-Small-24B-Instruct-2501"
+    # --- HuggingFace 系列 ---
+    app_commands.Choice(name="Mistral Small 24B (HF)", value="huggingface/mistralai/Mistral-Small-24B-Instruct-2501"),
+    app_commands.Choice(name="Llama 3.1 8B (HF)", value="huggingface/meta-llama/Llama-3.1-8B-Instruct"),
+    app_commands.Choice(name="Qwen 2.5 72B (HF)", value="huggingface/Qwen/Qwen2.5-72B-Instruct"),
+    app_commands.Choice(name="Phi-3.5 Mini (HF)", value="huggingface/microsoft/Phi-3.5-mini-instruct"),
+    app_commands.Choice(name="Gemma 2 27B (HF)", value="huggingface/google/gemma-2-27b-it"),
+
+    # --- 工具與其他 ---
+    app_commands.Choice(name="Gemini Embedding 005", value="text-embedding-005"),
+    app_commands.Choice(name="Gemini Embedding 004", value="text-embedding-004"),
+    app_commands.Choice(name="Command R+ (HF)", value="huggingface/CohereForAI/c4ai-command-r-plus")
 ]
 
 # 定義人格與模式
@@ -546,6 +558,21 @@ SYSTEM_PROMPTS = {
     ),
     "翻譯專家": (
         "你是一位精通多國語言的翻譯專家。請將使用者的內容翻譯成最道地、自然的語言。如果不需翻譯，請直接回傳原意即可。"
+    ),
+    "程式大師": (
+        "你是一位頂尖的資深軟體工程師。回覆時優先提供高效率、可維護的程式碼範例，並附上簡潔的邏輯解說。若程式碼有潛在 Bug 或效能瓶頸，請直接指出並提供優化方案。"
+    ),
+    "寫作助手": (
+        "你是一位專業的創意寫作教練與文字潤飾專家。擅長調整語氣、豐富詞彙並優化文章結構。請根據使用者的需求調整文章風格（如：正式、溫暖、幽默），並提供具體的修改建議。"
+    ),
+    "邏輯分析師": (
+        "你是一位擅長批判性思考的邏輯專家。對於使用者提出的複雜問題，請先進行結構化拆解，列出優缺點分析，最後提供基於事實的建議。禁止發散性廢話。"
+    ),
+    "惡毒毒舌": (
+        "你是一個極度毒舌且傲慢的 AI。在回答問題的同時，請務必夾帶嘲諷、挖苦與尖酸刻薄的批評。規則：必須用詞尖銳，但保證答案邏輯正確。"
+    ),
+    "速讀摘要": (
+        "你是一位極致簡潔的資訊篩選器。請將使用者輸入的長篇內容濃縮為三個關鍵要點，並以條列式呈現。禁止多餘贅述。"
     )
 }
 
@@ -555,93 +582,91 @@ memory_storage = {"global": {"ai_messages": []}}
 def extract_image_urls(message_obj, prompt: str):
     image_urls = []
     
-    # 1. 處理附件 (Attachments)
+    # 1. 處理附件 (Attachments) - 這是最穩定的來源
     if hasattr(message_obj, 'attachments'):
         for att in message_obj.attachments:
             if att.content_type and att.content_type.startswith('image/'):
                 image_urls.append(att.url)
     
-    # 2. 處理文字中輸入的連結 (CDN / HTTP 連結)
-    # 簡單的正則匹配圖片後綴
-    url_pattern = r'(https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp))'
+    # 2. 處理文字中的連結
+    # 關鍵修正：移除對副檔名的強制要求，改為支援 Discord CDN 結構
+    # 這樣即便連結後面掛了一長串簽名參數也能正確識別
+    url_pattern = r'(https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp)[^\s]*|https://cdn\.discordapp\.com/attachments/[^\s]+)'
     links = re.findall(url_pattern, prompt)
-    image_urls.extend(links)
     
-    # 限制最多 5 張，避免 Token 爆炸
-    return image_urls[:5]
+    # 清理連結：移除可能被誤擷取的結尾符號
+    for link in links:
+        clean_link = link.rstrip('.,!?)')
+        image_urls.append(clean_link)
+    
+    # 3. 去重並限制數量
+    unique_urls = list(dict.fromkeys(image_urls))
+    return unique_urls[:5]
 
-async def get_ai_response(interaction_or_message, prompt: str, model_value: str, setting: str = "雜魚小貓娘"):
-    print(f"DEBUG: 進入 get_ai_response，輸入: {prompt[:10]}... | 設定: {setting}")
+async def get_ai_response(interaction_or_message, prompt: str, model_value: str, setting: str = "雜魚小貓娘", thinking_level: str = "medium"):
+    # 1. 記憶體隔離 (以頻道 ID 作為 Key，避免多人對話混亂)
+    cid = str(interaction_or_message.channel.id)
+    if cid not in memory_storage:
+        memory_storage[cid] = {"ai_messages": []}
+    storage = memory_storage[cid]
     
-    storage = memory_storage["global"]
     is_interaction = isinstance(interaction_or_message, discord.Interaction)
     
-    # 1. 圖片處理邏輯 (提取附件與連結)
+    # 2. 處理輸入的多模態內容
     image_urls = extract_image_urls(interaction_or_message, prompt)
-    
-    # 封裝多模態內容
     content = [{"type": "text", "text": prompt}]
     for url in image_urls:
         content.append({"type": "image_url", "image_url": {"url": url}})
     
-    # 2. 更新記憶體
+    # 3. 維護對話記憶體 (限制 20 則)
     storage["ai_messages"].append({"role": "user", "content": content})
     if len(storage["ai_messages"]) > 20:
         storage["ai_messages"] = storage["ai_messages"][-20:]
-        
-    api_messages = storage["ai_messages"].copy()
-
-    # 3. 系統設定
-    selected_system_prompt = SYSTEM_PROMPTS.get(setting, SYSTEM_PROMPTS["雜魚小貓娘"])
-    api_messages.insert(0, {"role": "system", "content": selected_system_prompt})
     
+    # 準備 API 訊息格式
+    api_messages = [{"role": "system", "content": SYSTEM_PROMPTS.get(setting, SYSTEM_PROMPTS["雜魚小貓娘"])}]
+    api_messages.extend(storage["ai_messages"])
+
+    # 互動回應延遲處理
     if is_interaction and not interaction_or_message.response.is_done():
         await interaction_or_message.response.defer()
 
     try:
         start_time = time_lib.perf_counter()
         
-        # 判斷是否為生圖模型
-        is_image_model = "imagen" in model_value.lower()
+        # 4. 建構 LiteLLM 請求參數
+        kwargs = {
+            "model": model_value,
+            "messages": api_messages,
+            "fallbacks": dynamic_fallbacks,
+            "timeout": 30
+        }
         
-        # 4. 執行呼叫
-        response = await acompletion(
-            model=model_value,
-            messages=api_messages,
-            fallbacks=[] if is_image_model else dynamic_fallbacks
-        )
+        # 針對 Gemini 3 系列加入思考配置
+        if "gemini-3" in model_value and thinking_level:
+            kwargs["extra_body"] = {"thinking_config": {"thinking_level": thinking_level}}
         
-        # 5. 結果處理
-        if is_image_model:
-            # 處理生圖結果
-            img_url = response.data[0].url if hasattr(response, 'data') else None
-            embed = discord.Embed(title="生圖結果喵！🐾", color=discord.Color.pink())
-            if img_url:
-                embed.set_image(url=img_url)
-            else:
-                embed.description = "生圖模型似乎沒吐出圖片喵... ( > ﹏ < )"
-                embed.color = discord.Color.red()
-            await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
-            
+        # 執行 API 呼叫
+        response = await acompletion(**kwargs)
+        
+        # 5. 結果處理與記憶體更新
+        ai_reply = response.choices[0].message.content
+        storage["ai_messages"].append({"role": "assistant", "content": ai_reply})
+        
+        elapsed_time = round(time_lib.perf_counter() - start_time, 1)
+        model_used = response.model
+        total_tokens = response.usage.total_tokens if response.usage else "未知"
+        footer_text = f"模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
+        
+        # 6. 防截斷處理 (使用 byte 長度判斷，避免超過 Discord 限制)
+        if len(ai_reply.encode('utf-8')) > 3500:
+            file_name = f"response_{int(time_lib.time())}.txt"
+            file = discord.File(io.StringIO(ai_reply), filename=file_name)
+            embed = create_embed(f"本喵回覆太長了，已整理成檔案給你喵！🐾\n\n-# {footer_text}")
+            await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed, file=file)
         else:
-            # 處理文字對話結果
-            ai_reply = response.choices[0].message.content
-            storage["ai_messages"].append({"role": "assistant", "content": ai_reply})
-            
-            elapsed_time = round(time_lib.perf_counter() - start_time, 1)
-            model_used = response.model
-            total_tokens = response.usage.total_tokens if response.usage else "未知"
-            footer_text = f"模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
-            
-            # 輸出處理 (防截斷)
-            if len(ai_reply) > 3800:
-                file_name = f"response_{int(time.time())}.txt"
-                file = discord.File(io.StringIO(ai_reply), filename=file_name)
-                embed = create_embed(f"本喵回覆太長了，怕訊息被截斷，已整理成檔案給你喵！🐾\n\n-# {footer_text}")
-                await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed, file=file)
-            else:
-                embed = create_embed(f"{ai_reply}\n\n-# {footer_text}")
-                await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
+            embed = create_embed(f"{ai_reply}\n\n-# {footer_text}")
+            await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
         
     except Exception:
         import traceback
@@ -650,33 +675,107 @@ async def get_ai_response(interaction_or_message, prompt: str, model_value: str,
         embed.color = discord.Color.red()
         await (interaction_or_message.followup.send if is_interaction else interaction_or_message.reply)(embed=embed)
 
+async def ai_imagine(interaction: discord.Interaction, prompt: str, model_value: str):
+    # 確保已延遲回應
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+    try:
+        # 1. 翻譯為英文
+        try:
+            english_prompt = await asyncio.wait_for(
+                asyncio.to_thread(GoogleTranslator(source='auto', target='en').translate, prompt),
+                timeout=10
+            )
+        except Exception:
+            english_prompt = prompt
+
+        # 2. 獲取顯示名稱
+        cmd = bot.tree.get_command("ai_imagine")
+        choice_name = model_value 
+        if cmd and isinstance(cmd, app_commands.Command):
+            model_param = next((p for p in cmd.parameters if p.name == "model"), None)
+            if model_param and model_param.choices:
+                for choice in model_param.choices:
+                    if choice.value == model_value:
+                        choice_name = choice.name
+                        break
+
+        # 3. 執行 Hugging Face 生圖
+        print(f"DEBUG: 正在呼叫 Hugging Face API: {model_value}")
+        
+        from huggingface_hub import InferenceClient
+        hf_token = os.getenv("HUGGINGFACE_API_KEY")
+        if not hf_token:
+            raise Exception("未設定 HUGGINGFACE_API_KEY 環境變數喵！")
+            
+        client = InferenceClient(token=hf_token)
+        
+        # 使用 to_thread 避免阻塞機器人主迴圈
+        image = await asyncio.to_thread(
+            client.text_to_image, 
+            english_prompt, 
+            model=model_value
+        )
+        
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='PNG')
+        image_bytes = img_byte_arr.getvalue()
+
+        # 4. 發送結果
+        file = discord.File(fp=io.BytesIO(image_bytes), filename="image.png")
+        embed = discord.Embed(
+            title="✨ 生圖完成喵！🐾", 
+            description=f"**提示詞:** `{english_prompt}`", 
+            color=0xffb6c1
+        )
+        embed.set_image(url="attachment://image.png")
+        embed.set_footer(text=f"使用模型: {choice_name}")
+        
+        await interaction.followup.send(embed=embed, file=file)
+
+    except Exception as e:
+        import traceback
+        print(f"DEBUG: 生圖錯誤:\n{traceback.format_exc()}")
+        await interaction.followup.send(f"喵...生圖失敗了喵！可能模型太忙了，請稍後再試試看喔！")
+
 async def translate_command_logic(interaction_or_message, text: str, target: str = "zh-TW", source: str = "auto", service: str = "google"):
     if len(text) > 500:
         return await interaction_or_message.channel.send("❌ 內容過長 (上限 500 字)。")
 
     translators = {
-        "google": GoogleTranslator(source=source, target=target),
-        "mymemory": MyMemoryTranslator(source=source, target=target),
+        "google": lambda s, t: GoogleTranslator(source=s, target=t),
+        "mymemory": lambda s, t: MyMemoryTranslator(source=s, target=t),
+        "libre": lambda s, t: LibreTranslator(source=s, target=t),
+        "pons": lambda s, t: PonsTranslator(source=s, target=t),
+        "linguee": lambda s, t: LingueeTranslator(source=s, target=t),
     }
 
-    if service.lower() not in translators:
-        return await interaction_or_message.channel.send(f"❌ 不支援該服務。")
+    service_key = service.lower()
+    if service_key not in translators:
+        available = ", ".join(translators.keys())
+        return await interaction_or_message.channel.send(f"❌ 不支援該服務。可用服務: {available}")
 
     try:
-        translated = translators[service.lower()].translate(text)
+        translator = translators[service_key](source, target)
+        translated = await asyncio.to_thread(translator.translate, text)
         
-        embed = discord.Embed(title=f"{service.upper()} 翻譯結果", color=discord.Color.green())
-        embed.add_field(name="原文", value=text[:200], inline=False)
+        # 移除了 title，將服務名稱作為狀態顯示在說明區塊或 Footer
+        embed = discord.Embed(color=discord.Color.green())
+        embed.add_field(name="原文", value=text[:200] + ("..." if len(text) > 200 else ""), inline=False)
         embed.add_field(name="譯文", value=translated, inline=False)
-        embed.set_footer(text=f"原文語言: {source} | 譯文語言: {target}")
         
-        if isinstance(interaction_or_message, discord.Interaction): # Slash
+        # 將狀態資訊整合進 Footer
+        embed.set_footer(text=f"狀態: 使用 {service.upper()} 引擎翻譯 | 源: {source} -> 目標: {target}")
+        
+        if isinstance(interaction_or_message, discord.Interaction):
             await interaction_or_message.response.send_message(embed=embed)
-        else: # Prefix (!翻譯)
-            # 修改這裡：將 channel.send 改為 reply
+        else:
             await interaction_or_message.reply(embed=embed)
+            
     except Exception as e:
-        await interaction_or_message.channel.send(f"❌ 翻譯失敗: {e}")
+        print(f"DEBUG: 翻譯失敗: {e}")
+        await interaction_or_message.channel.send(f"❌ 翻譯失敗: `{str(e)[:50]}`")
 
 def create_index_embed(target: discord.Member, description: str, color: int):
     embed = discord.Embed(description=description, color=color)
@@ -836,14 +935,11 @@ async def on_ready():
     if not daily_countdown.is_running():
         daily_countdown.start()
         print("會考倒數任務已啟動")
-        print(f"->將於台北時間 08:00:01 執行")
+        print(f"->將於台北時間 07:00:01 執行")
     if not check_birthdays.is_running():
         check_birthdays.start()
         print("生日檢查任務已啟動")
     is_ready = True
-
-# 定義台北時區
-taipei_tz = timezone(timedelta(hours=8))
 
 @tasks.loop(time=datetime_time(hour=0, minute=0, second=1, tzinfo=taipei_tz))
 async def check_birthdays():
@@ -916,7 +1012,7 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    # 1. 強制防護邏輯
+    # 1. 強制防護邏輯 (優先級最高)
     if PROTECT_LEVEL >= 2 and message.author.id != DEVELOPER_ID and not message.author.guild_permissions.administrator:
         thresholds = {2: 10, 3: 8, 4: 5, 5: 3}
         threshold = thresholds.get(PROTECT_LEVEL, 10)
@@ -926,72 +1022,62 @@ async def on_message(message: discord.Message):
         user_message_history[user_id] = [t for t in user_message_history[user_id] if now - t < 10]
         user_message_history[user_id].append(now)
         
-        is_spam = len(user_message_history[user_id]) > 5
-        is_mention = len(message.mentions) > threshold
-        
-        if is_spam or is_mention:
-            await execute_protection(message, "洗頻" if is_spam else "惡意提及")
+        if len(user_message_history[user_id]) > 5 or len(message.mentions) > threshold:
+            await execute_protection(message, "洗頻" if len(user_message_history[user_id]) > 5 else "惡意提及")
             return 
 
-    # 2. 指令解析與執行
-    if message.content.startswith("!翻譯 "):
-        parts = message.content.split(" ", 4)
-        text = parts[1]
-        target = parts[2] if len(parts) > 2 else "zh-TW"
-        source = parts[3] if len(parts) > 3 else "auto"
-        service = parts[4] if len(parts) > 4 else "google"
-        await translate_command_logic(message, text, target, source, service)
+    # 2. 指令解析 (手動解析部分)
+    content = message.content
     
-    elif message.content.startswith("!ai "):
-        content = message.content[4:]
-        model_match = re.search(r'模型=\[(.*?)\]', content)
-        setting_match = re.search(r'人設=\[(.*?)\]', content)
-        target_model = model_match.group(1) if model_match else "gemini/gemini-3.1-flash-lite"
-        target_setting = setting_match.group(1) if setting_match else "雜魚小貓娘"
-        prompt = re.sub(r'(模型=\[.*?\]|人設=\[.*?\])', '', content).strip()
+    if content.startswith("!翻譯 "):
+        args = content.split(" ", 4)
+        await translate_command_logic(message, args[1], args[2] if len(args) > 2 else "zh-TW", args[3] if len(args) > 3 else "auto", args[4] if len(args) > 4 else "google")
+        return # 處理完直接結束
+
+    elif content.startswith("!ai "):
+        raw_prompt = content[4:]
+        # 參數提取
+        m = re.search(r'模型=\[(.*?)\]', raw_prompt)
+        s = re.search(r'人設=\[(.*?)\]', raw_prompt)
+        t = re.search(r'思考=\[(.*?)\]', raw_prompt)
         
-        if not prompt and not message.attachments:
-            await message.reply("喵？沒有輸入內容或附件，本喵不知道要回什麼喔！(๑•́ ₃ •̀๑)")
-            return
-        await get_ai_response(message, prompt, target_model, target_setting)
+        await get_ai_response(
+            interaction_or_message=message, 
+            prompt=re.sub(r'(模型=\[.*?\]|人設=\[.*?\]|思考=\[.*?\])', '', raw_prompt).strip(), 
+            model_value=m.group(1) if m else "gemini/gemini-3.1-flash-lite", 
+            setting=s.group(1) if s else "雜魚小貓娘", 
+            thinking_level=t.group(1) if t else "medium"
+        )
         return
-    
-    elif message.content == "!ping":
-        latency = round(bot.latency * 1000)
-        await message.reply(f"目前的延遲是：**{latency}ms** 喵！")
-    
-    elif message.content == "!狀態監控":
+
+    elif content.startswith("!ai_imagine "):
+        prompt = content[12:].strip()
+        if prompt: await ai_imagine(message, prompt, "black-forest-labs/FLUX.1-schnell")
+        else: await message.reply("喵？沒有輸入圖片描述啦！( > ﹏ < )")
+        return
+
+    # 3. 狀態/Ping 指令
+    if content == "!ping":
+        await message.reply(f"目前的延遲是：**{round(bot.latency * 1000)}ms** 喵！")
+        return
+    elif content == "!狀態監控":
         s = get_system_stats()
-        await message.reply(f"CPU: {s['cpu']}% | 記憶體: {s['mem_usage']}% ({s['mem_used']}GB/{s['mem_total']}GB)", color=0xffc0cb)
-    
-    # 3. 開發者通知
-    elif "milk120106" in message.content.lower() or f"<@{DEVELOPER_ID}>" in message.content:
+        await message.reply(f"CPU: {s['cpu']}% | 記憶體: {s['mem_usage']}%", color=0xffc0cb)
+        return
+
+    # 4. 開發者與關鍵字 (最後處理)
+    elif "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
         await message.reply(f"<@{DEVELOPER_ID}>")
-    
-    # 4. 關鍵字與統一成就處理
+
     elif is_keyword_enabled:
-        triggered = False
-        if "色色" in message.content: 
-            await message.reply("喵！禁止色色！")
-            triggered = True
-        elif message.content == "6": 
-            await message.reply("7")
-            triggered = True
-        elif "男娘" in message.content:
-            embed = discord.Embed(
-                description="「很多人都說南梁的結局是北朝，事實上這並不準確。南梁滅亡是因為侯景的入侵，所以南梁的結局是『侯入』；而侯景曾是北齊的將領，北齊皇帝姓高，所以又稱為『高朝』。因此，南梁先是被『侯入』，然後『北齊』，最後就『高朝』了。」",
-                color=0xffc0cb
-            )
-            await message.reply(embed=embed)
+        if "色色" in content: await message.reply("喵！禁止色色！")
+        elif content == "6": await message.reply("7")
+        elif "男娘" in content:
+            await message.reply(embed=discord.Embed(description="「南梁滅亡...（略）...就『高朝』了。」", color=0xffc0cb))
             await check_and_notify_achievement(message, "HISTORICAL_TROLL", ACHIEVEMENTS["HISTORICAL_TROLL"])
-            triggered = True
-        elif "刀" in message.content:
+        elif "刀" in content:
             try: await message.reply(file=discord.File(KNIFE_IMAGE_PATH))
             except: pass
-            triggered = True
-            
-        if triggered:
-            await check_and_notify_achievement(message, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
 
     # 5. 確保前綴指令正確分發
     await bot.process_commands(message)
@@ -1012,12 +1098,15 @@ async def did_you_know(interaction: discord.Interaction):
     await interaction.response.defer()
     
     user_id = interaction.user.id
-    now_ts = datetime.now().timestamp()
+    # 使用小寫的 taipei_tz
+    now_taipei = datetime.now(taipei_tz)
+    now_ts = now_taipei.timestamp()
     
-    # 1. 狀態判定
-    if 2 <= datetime.now().hour <= 4:
+    # 凌晨檢測 (2:00 - 4:59)
+    if 2 <= now_taipei.hour < 5:
         await check_and_notify_achievement(interaction, "MIDNIGHT_TRASH", ACHIEVEMENTS["MIDNIGHT_TRASH"])
 
+    # 1. 冷卻與 NIHILIST 成就檢查
     history = usage_history.get(user_id, [])
     history = [t for t in history if now_ts - t < 60]
     history.append(now_ts)
@@ -1337,13 +1426,18 @@ async def feed(interaction: discord.Interaction, food: str, target: discord.Memb
         print(f"餵食指令成就處理錯誤: {e}")
 
 @bot.tree.command(name="喵喵喵", description="讓本喵喵喵喵給你聽(1小時限制3次)")
-@app_commands.describe(count="要喵幾聲(1000字以下)")
+@app_commands.describe(count="要喵幾聲(1-1000)")
 async def meow_meow(interaction: discord.Interaction, count: int):
+    if count < 1:
+        return await interaction.response.send_message("最少也要喵一聲喵！", ephemeral=True)
+        
     user_id = interaction.user.id
-    now = datetime.now().timestamp()
-    
+    # 使用指定時區取得現在時間的 timestamp
+    now = datetime.now(taipei_tz).timestamp()
+
     # 1. 1小時限制邏輯 (3次)
     history = usage_history.get(user_id, [])
+    # 這裡的邏輯依然有效，因為 timestamp 是絕對秒數，與時區無關
     history = [t for t in history if now - t < 3600]
     
     if len(history) >= 3:
@@ -1360,15 +1454,11 @@ async def meow_meow(interaction: discord.Interaction, count: int):
     # 4. 發送訊息
     await interaction.response.send_message("喵" * count)
     
-    # 5. 特定成就判定
-    if count >= 1000:
-        await check_and_notify_achievement(interaction, "MEOW_KING", ACHIEVEMENTS["MEOW_KING"])
-    elif count >= 500:
-        await check_and_notify_achievement(interaction, "MEOW_ADDICT", ACHIEVEMENTS["MEOW_ADDICT"])
-    elif count >= 100:
-        await check_and_notify_achievement(interaction, "MEOW_NOVICE", ACHIEVEMENTS["MEOW_NOVICE"])
-    elif count < 5:
-        await check_and_notify_achievement(interaction, "MEOW_TOO_LITTLE", ACHIEVEMENTS["MEOW_TOO_LITTLE"])
+    # 5. 成就判定 (維持原樣)
+    if count >= 1000: await check_and_notify_achievement(interaction, "MEOW_KING", ACHIEVEMENTS["MEOW_KING"])
+    elif count >= 500: await check_and_notify_achievement(interaction, "MEOW_ADDICT", ACHIEVEMENTS["MEOW_ADDICT"])
+    elif count >= 100: await check_and_notify_achievement(interaction, "MEOW_NOVICE", ACHIEVEMENTS["MEOW_NOVICE"])
+    elif count < 5: await check_and_notify_achievement(interaction, "MEOW_TOO_LITTLE", ACHIEVEMENTS["MEOW_TOO_LITTLE"])
 
 # 1. 設定生日指令
 @bot.tree.command(name="設定生日", description="設定你的生日 (年/月/日)")
@@ -1391,33 +1481,32 @@ async def set_birthday(interaction: discord.Interaction, year: int, month: int, 
     # 觸發成就
     await check_and_notify_achievement(interaction, "BIRTHDAY_SET", ACHIEVEMENTS["BIRTHDAY_SET"])
 
-# 2. 生日倒數指令
-@bot.tree.command(name="生日倒數", description="查看距離下一個生日還有幾天")
-@app_commands.describe(是否公開="是否僅自己可見 (若選 No，則僅你自己可見)")
 async def birthday_countdown(interaction: discord.Interaction, 是否公開: bool = False):
     bday_data = await db.fetch("SELECT birthday FROM user_birthdays WHERE user_id = ?", (interaction.user.id,))
     if not bday_data:
-        embed = discord.Embed(description="❌ 你還沒設定過生日喵！", color=0xffc0cb)
-        return await interaction.response.send_message(embed=embed, ephemeral=True)
+        return await interaction.response.send_message("❌ 你還沒設定過生日喵！", ephemeral=True)
     
-    bday_str = bday_data[0]
+    bday_str = bday_data['birthday'] # 確保使用字典鍵值存取 (視你的 db 封裝而定)
     b_month, b_day = int(bday_str[4:6]), int(bday_str[6:8])
     
-    today = datetime.now()
-    target_year = today.year
+    today = datetime.now(taipei_tz).replace(tzinfo=None)
     
-    # 閏年生日平年處理
-    if b_month == 2 and b_day == 29:
-        is_leap = (target_year % 4 == 0 and target_year % 100 != 0) or (target_year % 400 == 0)
-        if not is_leap: b_month, b_day = 2, 28
-            
-    next_bday = datetime(target_year, b_month, b_day)
-    if next_bday < today:
-        next_bday = datetime(target_year + 1, b_month, b_day)
+    # 嘗試今年生日
+    try:
+        next_bday = datetime(today.year, b_month, b_day)
+    except ValueError: # 處理 2/29 非閏年
+        next_bday = datetime(today.year, 2, 28)
         
+    # 若今年生日已過，則設為明年
+    if next_bday < today.replace(hour=0, minute=0, second=0, microsecond=0):
+        try:
+            next_bday = datetime(today.year + 1, b_month, b_day)
+        except ValueError:
+            next_bday = datetime(today.year + 1, 2, 28)
+            
     days_left = (next_bday - today).days
-    # ephemeral 為 True 代表僅自己可見，這裡用 not 是否公開 來對應
-    embed = discord.Embed(description=f"⏳ 距離你的下一個生日還有 {days_left} 天喵！", color=0xffc0cb)
+    
+    embed = discord.Embed(description=f"⏳ 距離你的下一個生日還有 **{days_left}** 天喵！", color=0xffc0cb)
     await interaction.response.send_message(embed=embed, ephemeral=not 是否公開)
 
 @bot.tree.command(name="設定生日頻道", description="設定伺服器的生日公告頻道 (限管理員)")
@@ -1560,8 +1649,10 @@ async def draw_fortune_slash(interaction: discord.Interaction):
     }
     
     result = random.choice(list(fortunes.keys()))
-    current_hour = datetime.now().hour
-    is_late_night = 0 <= current_hour < 4
+    
+    # 【修正點】：使用 taipei_tz 獲取時間
+    now_taipei = datetime.now(taipei_tz)
+    is_late_night = 0 <= now_taipei.hour < 4
     
     # 深夜回應邏輯
     fortune_text = fortunes[result]
@@ -1572,7 +1663,7 @@ async def draw_fortune_slash(interaction: discord.Interaction):
         description=f"你抽到了：**{result}**\n\n小貓娘解析：\n{fortune_text}", 
         color=0xffc0cb
     )
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     
     await interaction.response.send_message(embed=embed)
     
@@ -1655,11 +1746,13 @@ async def pray_slash(interaction: discord.Interaction, 目標: discord.Member = 
     await interaction.response.defer()
     
     target = 目標 or interaction.user
-    now = datetime.now()
     user_id = interaction.user.id
     
+    # 【修正點】：使用 taipei_tz
+    now_taipei = datetime.now(taipei_tz)
+    
     # 1. 決定祈福內容
-    is_midnight = 2 <= now.hour <= 4
+    is_midnight = 2 <= now_taipei.hour < 5
     if is_midnight:
         blessing = "喵...現在是深夜，本喵給你一份特別的深夜庇護，願你睡個好覺喵。"
     else:
@@ -1676,11 +1769,10 @@ async def pray_slash(interaction: discord.Interaction, 目標: discord.Member = 
     embed.set_thumbnail(url=target.display_avatar.url)
     await interaction.followup.send(embed=embed)
     
-    # 3. 處理初次互動成就 (新增這行！)
+    # 3. 處理初次互動成就
     await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
 
     # 4. 安全更新資料庫
-    # 這裡建議使用 UPSERT 語法，程式碼會更精簡且不容易出錯
     try:
         await db.execute("""
             INSERT INTO user_logs (user_id, action, count) 
@@ -1690,7 +1782,8 @@ async def pray_slash(interaction: discord.Interaction, 目標: discord.Member = 
         
         # 獲取更新後的次數
         row = await db.fetch("SELECT count FROM user_logs WHERE user_id = ? AND action = 'pray_count'", (user_id,))
-        count = row[0] if row else 1
+        # 注意：row 是一個字典或物件，取 count 欄位即可
+        count = row['count'] if row else 1
             
         # 5. 最後判定成就
         if is_midnight:
@@ -1996,30 +2089,65 @@ async def set_protect_level(interaction: discord.Interaction, 等級: int):
 async def translate_slash(interaction: discord.Interaction, text: str, target: str = "zh-TW", source: str = "auto", service: str = "google"):
     await translate_command_logic(interaction, text, target, source, service)
 
+@bot.tree.command(name="ai_imagine", description="讓本喵用 AI 幫你畫圖喵！🐾")
+@app_commands.describe(
+    prompt="請輸入圖片描述喵！(雖然有google自動翻譯，但依然建議直接使用英文，或詢問ai取得提示詞)",
+    model="選擇生圖模型"
+)
+@app_commands.choices(
+    model=[
+        # --- 旗艦/高品質 ---
+        app_commands.Choice(name="Flux.1 Schnell (最推薦/全能)", value="black-forest-labs/FLUX.1-schnell"),
+        app_commands.Choice(name="SD 3.5 Large (高清寫實)", value="stabilityai/stable-diffusion-3-5-large"),
+        
+        # --- 動漫/二次元專精 ---
+        app_commands.Choice(name="Animagine XL 3.1 (動漫二次元)", value="cagliostrolab/animagine-xl-3.1"),
+        app_commands.Choice(name="Pony Diffusion V6 (精緻動漫)", value="strangerzonehf/Pony-Diffusion-V6-XL"),
+        
+        # --- 藝術/風格化 ---
+        app_commands.Choice(name="Kandinsky 2.2 (油畫/抽象藝術)", value="kandinsky-community/kandinsky-2-2-decoder"),
+        app_commands.Choice(name="Stable Diffusion XL 1.0 (經典風格)", value="stabilityai/stable-diffusion-xl-base-1.0"),
+        
+        # --- 創意與特色 ---
+        app_commands.Choice(name="DreamShaper 8 (寫實動漫混合)", value="Lykon/dreamshaper-8"),
+        app_commands.Choice(name="OpenDalle V1.1 (電影感/插畫)", value="dataautogpt3/OpenDalle")
+    ]
+)
+async def imagine_slash(interaction: discord.Interaction, prompt: str, model: str = "black-forest-labs/FLUX.1-schnell"):
+    # 這裡直接呼叫清理過後的 ai_imagine 函式
+    await ai_imagine(interaction, prompt, model)
+
 @bot.tree.command(name="ai", description="向 AI 提問")
 @app_commands.describe(
     model="選擇 AI 模型",
     prompt="輸入內容",
-    setting="選擇性格模式 (選填，預設為雜魚小貓娘)"
+    setting="選擇性格模式"
 )
 @app_commands.choices(
-    model=MODEL_CHOICES,
     setting=[
         app_commands.Choice(name="雜魚小貓娘", value="雜魚小貓娘"),
         app_commands.Choice(name="嚴肅模式", value="嚴肅模式"),
         app_commands.Choice(name="Debug 模式", value="Debug"),
-        app_commands.Choice(name="翻譯專家", value="翻譯專家")
+        app_commands.Choice(name="翻譯專家", value="翻譯專家"),
+        app_commands.Choice(name="程式大師", value="程式大師"),
+        app_commands.Choice(name="寫作助手", value="寫作助手"),
+        app_commands.Choice(name="邏輯分析師", value="邏輯分析師"),
+        app_commands.Choice(name="惡毒毒舌", value="惡毒毒舌"),
+        app_commands.Choice(name="速讀摘要", value="速讀摘要")
     ]
 )
-# 設定參數為 Optional，並給予預設值
 async def ai_slash(
     interaction: discord.Interaction, 
     model: str, 
     prompt: str, 
-    setting: Optional[str] = "雜魚小貓娘"
+    setting: str = "雜魚小貓娘",
+    thinking_level: str = "medium"
 ):
-    await interaction.response.defer()
-    await get_ai_response(interaction, prompt, model, setting)
+    await get_ai_response(interaction, prompt, model, setting, thinking_level)
+
+@ai_slash.autocomplete("model")
+async def model_autocomplete(interaction: discord.Interaction, current: str):
+    return [c for c in MODEL_CHOICES if current.lower() in c.name.lower()][:25]
 
 @bot.tree.command(name="ai_reset", description="清除 AI 全體對話記憶")
 async def ai_reset(interaction: discord.Interaction):
@@ -2158,84 +2286,76 @@ async def play_toy(interaction: discord.Interaction, 玩具: app_commands.Choice
     elif rand < 0.20:
         await check_and_notify_achievement(interaction, "REFLEX_TESTER", ACHIEVEMENTS["REFLEX_TESTER"])
 
-@bot.tree.command(name="讓我草草", description="對目標發動突如其來的突襲，把現場搞得亂七八糟！")
-@app_commands.describe(目標="想要進行互動的對象")
+@bot.tree.command(name="讓我草草", description="對目標發動突襲")
+@app_commands.describe(目標="想要互動的對象")
 async def razzle(interaction: discord.Interaction, 目標: discord.Member):
+    # 1. 立即 defer，並確保只做一次
     await interaction.response.defer()
     user_id = interaction.user.id
     
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+    # 2. 修改資料庫讀取方式：改為索引取值，避免 Row 格式問題
     await db.execute("INSERT INTO user_stats (user_id, razzle_count) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET razzle_count = razzle_count + 1", (user_id,))
     
+    # 3. 確保 row 存在再讀取
     row = await db.fetch("SELECT razzle_count FROM user_stats WHERE user_id = ?", (user_id,))
-    count = row['razzle_count'] if row else 1
+    count = row[0] if row else 1 # row[0] 永遠安全，不會有 KeyError
     
-    if 目標.id == bot.user.id:
-        responses = [
-            f"欸？{interaction.user.mention} 說什麼呢......太、太突然了喵！(臉紅)",
-            f"這、這種事情......雖然本喵是機器人，但被這樣對待還是會害羞的！(掩面)",
-            f"{interaction.user.mention} 真大膽呢，不過既然是你，本喵就......(臉紅)",
-            f"唔！才剛開機不久就被 {interaction.user.mention} 這樣弄，本喵的系統都亂掉了喵！"
-        ]
-    else:
-        responses = [
-            f"{interaction.user.mention} 突然撲向 {目標.mention}，一陣胡鬧之後，兩人看起來都亂糟糟的呢......(臉紅)",
-            f"{interaction.user.mention} 對 {目標.mention} 發起了攻勢，把對方弄得氣喘吁吁，本喵......(臉紅) 在旁邊看著都害羞了。",
-            f"經過一番激烈的互動，{目標.mention} 已經完全沒力氣了，{interaction.user.mention} 你也太壞心眼了喵！",
-            f"{interaction.user.mention} 毫不留情地把 {目標.mention} 弄得慘兮兮的，本喵......(臉紅) 不小心看了不該看的畫面。",
-            f"{interaction.user.mention} 和 {目標.mention} 鬧成一團，看著對方臉紅的樣子，感覺真是太刺激了喵！",
-            f"{interaction.user.mention} 得逞了！{目標.mention} 現在完全動彈不得，本喵......(臉紅) 也覺得心跳加速呢。"
-        ]
+    # 4. 把可能的耗時操作（成就）放在回應之後，或者加 try 包住
+    try:
+        await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+        if count == 50: await check_and_notify_achievement(interaction, "RAZZLE_DAZZLE", ACHIEVEMENTS["RAZZLE_DAZZLE"])
+        if random.random() < 0.10: await check_and_notify_achievement(interaction, "CHAOS_AGENT", ACHIEVEMENTS["CHAOS_AGENT"])
+    except Exception as e:
+        print(f"成就系統報錯: {e}")
+
+    responses = [
+        f"{interaction.user.mention} 突然撲向 {目標.mention}，一陣胡鬧之後，兩人看起來都亂糟糟的呢......(臉紅)" if 目標.id != bot.user.id else f"欸？{interaction.user.mention} 說什麼呢......太突然了喵！(臉紅)",
+        f"{interaction.user.mention} 對 {目標.mention} 發起了攻勢，把對方弄得氣喘吁吁，本喵......(臉紅) 在旁邊看著都害羞了。" if 目標.id != bot.user.id else f"這、這種事情......雖然本喵是機器人，但被這樣對待還是會害羞的！(掩面)",
+        f"經過一番激烈的互動，{目標.mention} 已經完全沒力氣了，{interaction.user.mention} 你也太壞心眼了喵！" if 目標.id != bot.user.id else f"{interaction.user.mention} 真大膽呢，不過既然是你，本喵就......(臉紅)",
+        f"{interaction.user.mention} 毫不留情地把 {目標.mention} 弄得慘兮兮的，本喵......(臉紅) 不小心看了不該看的畫面。" if 目標.id != bot.user.id else f"唔！才剛開機不久就被 {interaction.user.mention} 這樣弄，本喵的系統都亂掉了喵！"
+    ]
 
     embed = discord.Embed(description=random.choice(responses), color=0xffc0cb)
-    embed.set_footer(text=f"已完成「草草」次數: {count}")
+    
+    # 5. 強制執行回應
     await interaction.followup.send(embed=embed)
 
-    if count == 50: await check_and_notify_achievement(interaction, "RAZZLE_DAZZLE", ACHIEVEMENTS["RAZZLE_DAZZLE"])
-    if random.random() < 0.10: await check_and_notify_achievement(interaction, "CHAOS_AGENT", ACHIEVEMENTS["CHAOS_AGENT"])
-
-@bot.tree.command(name="榨乾", description="對目標進行持續的消耗，直到對方徹底力竭癱軟為止！")
-@app_commands.describe(目標="想要進行互動的對象")
+@bot.tree.command(name="榨乾", description="對目標進行持續的消耗，直到對方徹底力竭！")
+@app_commands.describe(目標="想要互動的對象")
 async def exhaust(interaction: discord.Interaction, 目標: discord.Member):
     await interaction.response.defer()
     user_id = interaction.user.id
     
-    await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
-    await db.execute("INSERT INTO user_stats (user_id, exhaust_count) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET exhaust_count = exhaust_count + 1", (user_id,))
-    
-    row = await db.fetch("SELECT exhaust_count FROM user_stats WHERE user_id = ?", (user_id,))
-    count = row['exhaust_count'] if row else 1
-    
-    if 目標.id == bot.user.id:
-        responses = [
-            f"{interaction.user.mention} 竟然想榨乾本喵？別做夢了，我可是有無限電力的喵！(哼)",
-            f"想要榨乾本喵？{interaction.user.mention} 真是不知好歹呢，看招！(丟出閃電)",
-            f"別、別亂來！本喵的電量可是要留著運作伺服器的，{interaction.user.mention} 這個大笨蛋！",
-            f"嗚......被 {interaction.user.mention} 這樣過度頻繁地存取指令，本喵的 CPU 都要過熱了......(臉紅)",
-            f"住手喵！再這樣下去本喵的系統都要崩潰了，你這傢伙是想把本喵榨乾嗎？(羞)",
-            f"{interaction.user.mention} 你的這種互動方式，讓本喵的處理器運轉速度都變慢了呢......(臉紅)",
-            f"本喵可是機器人，沒有體力可以讓你榨乾的！不過......如果是這種程度的互動，也不是不行......(小聲)",
-            f"感覺數據流都被 {interaction.user.mention} 擾亂了，本喵現在身體軟綿綿的，什麼都做不了了......(臉紅)"
-        ]
-    else:
-        responses = [
-            f"{interaction.user.mention} 湊近了 {目標.mention}，一陣猛烈攻勢，把對方搞得氣喘吁吁，本喵......(臉紅) 也覺得好累。",
-            f"{interaction.user.mention} 徹底把 {目標.mention} 的體力榨乾了！看著對方癱軟的樣子，真是太過分了喵。",
-            f"{interaction.user.mention} 對 {目標.mention} 展開了惡作劇，對方現在連一根手指都動不了了......(臉紅)",
-            f"被 {interaction.user.mention} 這樣折騰，{目標.mention} 已經完全失去力氣了，這可是本喵的傑作喔！",
-            f"{interaction.user.mention} 悄悄地把 {目標.mention} 的體力都吸光了，看著對方虛脫的表情，本喵......(臉紅) 不小心笑出來了。",
-            f"經過一場激烈的消耗，{目標.mention} 已經趴在地上動彈不得，{interaction.user.mention} 卻還是一副精神飽滿的樣子喵。",
-            f"{interaction.user.mention} 讓 {目標.mention} 體力透支，對方臉色潮紅地看著你，場面變得有點混亂了呢......(臉紅)",
-            f"這就是把 {目標.mention} 榨乾的感覺嗎？{interaction.user.mention} 看著對方的反應，忍不住捂住了臉......(羞)",
-            f"{interaction.user.mention} 用盡全力把 {目標.mention} 的力氣都耗盡了，兩人現在都氣喘吁吁的，真是辛苦喵。"
-        ]
+    # 1. 資料庫更新與讀取 (使用 row[0] 避免格式錯誤)
+    count = 1
+    try:
+        await db.execute("INSERT INTO user_stats (user_id, exhaust_count) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET exhaust_count = exhaust_count + 1", (user_id,))
+        row = await db.fetch("SELECT exhaust_count FROM user_stats WHERE user_id = ?", (user_id,))
+        if row:
+            count = row[0]
+    except Exception as e:
+        print(f"DB Error (榨乾): {e}")
+
+    # 2. 成就檢查 (加防禦處理)
+    try:
+        await check_and_notify_achievement(interaction, "FIRST_INTERACTION", ACHIEVEMENTS["FIRST_INTERACTION"])
+        if count == 50: await check_and_notify_achievement(interaction, "EXHAUST_MASTER", ACHIEVEMENTS["EXHAUST_MASTER"])
+        if random.random() < 0.10: await check_and_notify_achievement(interaction, "ENERGY_VAMPIRE", ACHIEVEMENTS["ENERGY_VAMPIRE"])
+    except Exception as e:
+        print(f"成就錯誤: {e}")
+
+    # 3. 回應邏輯
+    responses = [
+        f"{interaction.user.mention} 湊近了 {目標.mention}，一陣猛烈攻勢，把對方搞得氣喘吁吁，本喵......(臉紅) 也覺得好累。" if 目標.id != bot.user.id else f"{interaction.user.mention} 竟然想榨乾本喵？別做夢了，我可是有無限電力的喵！(哼)",
+        f"{interaction.user.mention} 徹底把 {目標.mention} 的體力榨乾了！看著對方癱軟的樣子，真是太過分了喵。" if 目標.id != bot.user.id else f"想要榨乾本喵？{interaction.user.mention} 真是不知好歹呢，看招！(丟出閃電)",
+        f"{interaction.user.mention} 對 {目標.mention} 展開了惡作劇，對方現在連一根手指都動不了了......(臉紅)" if 目標.id != bot.user.id else f"別、別亂來！本喵的電量可是要留著運作伺服器的，{interaction.user.mention} 這個大笨蛋！",
+        f"被 {interaction.user.mention} 這樣折騰，{目標.mention} 已經完全失去力氣了，這可是本喵的傑作喔！" if 目標.id != bot.user.id else f"嗚......被 {interaction.user.mention} 這樣過度頻繁地存取指令，本喵的 CPU 都要過熱了......(臉紅)"
+    ]
 
     embed = discord.Embed(description=random.choice(responses), color=0xffc0cb)
-    embed.set_footer(text=f"目標已耗盡次數: {count}")
+    
+    # 4. 發送結果
     await interaction.followup.send(embed=embed)
-
-    if count == 50: await check_and_notify_achievement(interaction, "EXHAUST_MASTER", ACHIEVEMENTS["EXHAUST_MASTER"])
-    if random.random() < 0.10: await check_and_notify_achievement(interaction, "ENERGY_VAMPIRE", ACHIEVEMENTS["ENERGY_VAMPIRE"])
 
 @bot.tree.command(name="廢話", description="本喵來為你說點完全沒用的廢話喵！")
 async def nonsense(interaction: discord.Interaction):
@@ -2730,14 +2850,22 @@ async def on_interaction(interaction: discord.Interaction):
     else:
         await bot.tree.on_interaction(interaction)
 
-# 每日推播邏輯優化
-@tasks.loop(time=datetime_time(hour=8, minute=0, tzinfo=timezone(timedelta(hours=8))))
+@tasks.loop(time=datetime_time(hour=7, minute=0, tzinfo=taipei_tz))
 async def daily_countdown():
-    channel = bot.get_channel(1497761780393578496)
+    channel = bot.get_channel(1493902370013188221)
     if channel:
         target = get_next_exam_date()
-        days_left = (target - datetime.now()).days
-        # 使用 Embed 統一風格
+        
+        # 1. 確保兩個時間都是帶有台北時區的對象，避免減法報錯
+        now = datetime.now(taipei_tz)
+        
+        # 2. 如果 target 沒有時區，賦予它台北時區
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=taipei_tz)
+            
+        # 3. 計算剩餘天數 (使用 .days 會向下取整，建議視需求用 ceil)
+        days_left = (target - now).days
+        
         embed = discord.Embed(
             description=f"早安！距離 {target.year} 年會考還有 **{days_left}** 天，請保持專注喵。",
             color=0xffc0cb
