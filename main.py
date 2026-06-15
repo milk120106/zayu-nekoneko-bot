@@ -506,38 +506,29 @@ def create_embed(description):
 
 MODEL_CHOICES = [
     # --- Google Gemini 系列 ---
-    app_commands.Choice(name="Gemini 3 Flash", value="gemini/gemini-3-flash"),
-    app_commands.Choice(name="Gemini 2.5 Flash", value="gemini/gemini-2.5-flash"),
-    app_commands.Choice(name="Gemini 2.5 Flash Lite", value="gemini/gemini-2.5-flash-lite"),
-    app_commands.Choice(name="Gemma 4 26B", value="gemini/gemma-4-26b"),
-    app_commands.Choice(name="Gemma 4 31B", value="gemini/gemma-4-31b"),
-    app_commands.Choice(name="Gemini 1.5 Pro", value="gemini/gemini-1.5-pro"),
-    app_commands.Choice(name="Gemini 1.5 Flash", value="gemini/gemini-1.5-flash"),
+    app_commands.Choice(name="Gemini 3.5 Flash [平衡]", value="gemini/gemini-3.5-flash"),
+    app_commands.Choice(name="Gemini 3.1 Flash Lite [最便宜]", value="gemini/gemini-3.1-flash-lite"),
+    app_commands.Choice(name="Gemini 3.1 Pro [平衡]", value="gemini/gemini-3.1-pro-preview"),
+    app_commands.Choice(name="Gemini Pro [較貴]", value="gemini/gemini-pro-latest"),
+    app_commands.Choice(name="Gemini Flash [便宜]", value="gemini/gemini-flash-latest"),
+    app_commands.Choice(name="Gemini Flash-Lite [最便宜]", value="gemini/gemini-flash-lite-latest"),
 
     # --- Groq 系列 ---
-    app_commands.Choice(name="Llama 3.3 70B (Groq)", value="groq/llama-3.3-70b-versatile"),
-    app_commands.Choice(name="Llama 3.1 8B (Groq)", value="groq/llama-3.1-8b-instant"),
-    app_commands.Choice(name="Mixtral 8x7B (Groq)", value="groq/mixtral-8x7b-32768"),
-    app_commands.Choice(name="Gemma 2 9B (Groq)", value="groq/gemma-2-9b-it"),
-    app_commands.Choice(name="Llama 3.1 70B (Groq)", value="groq/llama-3.1-70b-versatile"),
-    app_commands.Choice(name="Llama 3.2 11B (Groq)", value="groq/llama-3.2-11b-vision-preview"),
-    app_commands.Choice(name="Qwen 2.5 Coder 32B (Groq)", value="groq/qwen-2.5-coder-32b"),
-    app_commands.Choice(name="Llama 3.2 3B (Groq)", value="groq/llama-3.2-3b-preview"),
-    app_commands.Choice(name="Mistral 7B (Groq)", value="groq/mistral-7b-instruct-v0.3"),
-    app_commands.Choice(name="Llama 3.3 70B (Groq Direct)", value="groq/llama-3.3-70b-specdec"),
+    app_commands.Choice(name="Llama 3.3 70B (Groq) [較貴]", value="groq/llama-3.3-70b-versatile"),
+    app_commands.Choice(name="Llama 3.1 8B (Groq) [便宜]", value="groq/llama-3.1-8b-instant"),
+    app_commands.Choice(name="Qwen 2.5 Coder 32B (Groq) [平衡]", value="groq/qwen-2.5-coder-32b"),
 
     # --- HuggingFace 系列 ---
-    app_commands.Choice(name="Mistral Small 24B (HF)", value="huggingface/mistralai/Mistral-Small-24B-Instruct-2501"),
-    app_commands.Choice(name="Llama 3.1 8B (HF)", value="huggingface/meta-llama/Llama-3.1-8B-Instruct"),
-    app_commands.Choice(name="Qwen 2.5 72B (HF)", value="huggingface/Qwen/Qwen2.5-72B-Instruct"),
-    app_commands.Choice(name="Phi-3.5 Mini (HF)", value="huggingface/microsoft/Phi-3.5-mini-instruct"),
-    app_commands.Choice(name="Gemma 2 27B (HF)", value="huggingface/google/gemma-2-27b-it"),
+    app_commands.Choice(name="Hermes 3 Llama 3.1 8B (HF) [最推薦 - 最便宜]", value="NousResearch/Hermes-3-Llama-3.1-8B:cheapest"),
+    app_commands.Choice(name="DeepSeek V3 0324 (HF) [推薦 - 平衡]", value="deepseek-ai/DeepSeek-V3-0324:cheapest"),
+    app_commands.Choice(name="Qwen 2.5 7B Instruct (HF) [便宜]", value="Qwen/Qwen2.5-7B-Instruct:cheapest"),
+    app_commands.Choice(name="Qwen 2.5 32B Instruct (HF) [平衡 - 較貴]", value="Qwen/Qwen2.5-32B-Instruct:cheapest"),
 
-    # --- 工具與其他 ---
-    app_commands.Choice(name="Gemini Embedding 005", value="text-embedding-005"),
-    app_commands.Choice(name="Gemini Embedding 004", value="text-embedding-004"),
-    app_commands.Choice(name="Command R+ (HF)", value="huggingface/CohereForAI/c4ai-command-r-plus")
+    # --- 數據處理 ---
+    app_commands.Choice(name="Gemini Embedding 1 (數據處理)", value="gemini/text-embedding-004"),
+    app_commands.Choice(name="Gemini Embedding 2 (數據處理)", value="gemini/text-embedding-005")
 ]
+
 
 # 定義人格與模式
 SYSTEM_PROMPTS = {
@@ -638,13 +629,10 @@ async def get_ai_response(interaction_or_message, prompt: str, model_value: str,
         kwargs = {
             "model": model_value,
             "messages": api_messages,
-            "fallbacks": dynamic_fallbacks,
-            "timeout": 30
+            "timeout": 30,
+            "api_base": "https://router.huggingface.co/v1",
+            "api_key": os.getenv("HF_TOKEN")
         }
-        
-        # 針對 Gemini 3 系列加入思考配置
-        if "gemini-3" in model_value and thinking_level:
-            kwargs["extra_body"] = {"thinking_config": {"thinking_level": thinking_level}}
         
         # 執行 API 呼叫
         response = await acompletion(**kwargs)
@@ -656,10 +644,10 @@ async def get_ai_response(interaction_or_message, prompt: str, model_value: str,
         elapsed_time = round(time_lib.perf_counter() - start_time, 1)
         model_used = response.model
         total_tokens = response.usage.total_tokens if response.usage else "未知"
-        footer_text = f"模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
+        footer_text = f"模式: {setting} | 模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
         
         # 6. 防截斷處理 (使用 byte 長度判斷，避免超過 Discord 限制)
-        if len(ai_reply.encode('utf-8')) > 3500:
+        if len(ai_reply.encode('utf-8')) > 3800:
             file_name = f"response_{int(time_lib.time())}.txt"
             file = discord.File(io.StringIO(ai_reply), filename=file_name)
             embed = create_embed(f"本喵回覆太長了，已整理成檔案給你喵！🐾\n\n-# {footer_text}")
@@ -702,28 +690,28 @@ async def ai_imagine(interaction: discord.Interaction, prompt: str, model_value:
                         break
 
         # 3. 執行 Hugging Face 生圖
-        print(f"DEBUG: 正在呼叫 Hugging Face API: {model_value}")
-        
-        from huggingface_hub import InferenceClient
         hf_token = os.getenv("HUGGINGFACE_API_KEY")
         if not hf_token:
-            raise Exception("未設定 HUGGINGFACE_API_KEY 環境變數喵！")
+            raise Exception("未設定 HUGGINGFACE_API_KEY")
             
         client = InferenceClient(token=hf_token)
         
-        # 使用 to_thread 避免阻塞機器人主迴圈
-        image = await asyncio.to_thread(
-            client.text_to_image, 
-            english_prompt, 
-            model=model_value
+        # 使用 to_thread 進行生圖 (增加超時限制，防止某些模型卡死)
+        image = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.text_to_image, 
+                english_prompt, 
+                model=model_value
+            ),
+            timeout=45 # 增加到 45 秒，大型模型(如 SD 3.5)需要較多時間
         )
         
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='PNG')
-        image_bytes = img_byte_arr.getvalue()
+        img_byte_arr.seek(0) # 修正點：必須將指標移回開頭，否則 file 讀取會是空的
 
         # 4. 發送結果
-        file = discord.File(fp=io.BytesIO(image_bytes), filename="image.png")
+        file = discord.File(fp=img_byte_arr, filename="image.png")
         embed = discord.Embed(
             title="✨ 生圖完成喵！🐾", 
             description=f"**提示詞:** `{english_prompt}`", 
@@ -734,10 +722,11 @@ async def ai_imagine(interaction: discord.Interaction, prompt: str, model_value:
         
         await interaction.followup.send(embed=embed, file=file)
 
+    except asyncio.TimeoutError:
+        await interaction.followup.send("喵...處理時間太長，模型可能在休息，請稍後再試喵！")
     except Exception as e:
-        import traceback
-        print(f"DEBUG: 生圖錯誤:\n{traceback.format_exc()}")
-        await interaction.followup.send(f"喵...生圖失敗了喵！可能模型太忙了，請稍後再試試看喔！")
+        print(f"DEBUG: 生圖錯誤: {e}")
+        await interaction.followup.send("喵...生圖失敗了喵！可能模型太忙或不支援該請求喵！")
 
 async def translate_command_logic(interaction_or_message, text: str, target: str = "zh-TW", source: str = "auto", service: str = "google"):
     if len(text) > 500:
@@ -1036,17 +1025,14 @@ async def on_message(message: discord.Message):
 
     elif content.startswith("!ai "):
         raw_prompt = content[4:]
-        # 參數提取
         m = re.search(r'模型=\[(.*?)\]', raw_prompt)
         s = re.search(r'人設=\[(.*?)\]', raw_prompt)
-        t = re.search(r'思考=\[(.*?)\]', raw_prompt)
         
         await get_ai_response(
             interaction_or_message=message, 
-            prompt=re.sub(r'(模型=\[.*?\]|人設=\[.*?\]|思考=\[.*?\])', '', raw_prompt).strip(), 
+            prompt=re.sub(r'(模型=\[.*?\]|人設=\[.*?\])', '', raw_prompt).strip(), 
             model_value=m.group(1) if m else "gemini/gemini-3.1-flash-lite", 
-            setting=s.group(1) if s else "雜魚小貓娘", 
-            thinking_level=t.group(1) if t else "medium"
+            setting=s.group(1) if s else "雜魚小貓娘"
         )
         return
 
@@ -1065,12 +1051,17 @@ async def on_message(message: discord.Message):
         await message.reply(f"CPU: {s['cpu']}% | 記憶體: {s['mem_usage']}%", color=0xffc0cb)
         return
 
-    # 4. 開發者與關鍵字 (最後處理)
-    elif "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
-        await message.reply(f"<@{DEVELOPER_ID}>")
+    # 4. 開發者關鍵字
+    elif message.author.id == DEVELOPER_ID:
+        if "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
+            await message.reply(f"<@{DEVELOPER_ID}>")
 
     elif is_keyword_enabled:
-        if "色色" in content: await message.reply("喵！禁止色色！")
+        # 其他人的提及關鍵字判斷
+        if "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
+            await message.reply(f"<@{DEVELOPER_ID}>")
+        # 一般關鍵字判斷
+        elif "色色" in content: await message.reply("喵！禁止色色！")
         elif content == "6": await message.reply("7")
         elif "男娘" in content:
             await message.reply(embed=discord.Embed(description="「南梁滅亡...（略）...就『高朝』了。」", color=0xffc0cb))
@@ -2091,30 +2082,17 @@ async def translate_slash(interaction: discord.Interaction, text: str, target: s
 
 @bot.tree.command(name="ai_imagine", description="讓本喵用 AI 幫你畫圖喵！🐾")
 @app_commands.describe(
-    prompt="請輸入圖片描述喵！(雖然有google自動翻譯，但依然建議直接使用英文，或詢問ai取得提示詞)",
-    model="選擇生圖模型"
+    prompt="請輸入圖片描述喵！(會自動翻譯提示詞，但建議使用英文，或詢問ai取得英文提示詞)",
+model="選擇生圖模型"
 )
 @app_commands.choices(
     model=[
-        # --- 旗艦/高品質 ---
-        app_commands.Choice(name="Flux.1 Schnell (最推薦/全能)", value="black-forest-labs/FLUX.1-schnell"),
-        app_commands.Choice(name="SD 3.5 Large (高清寫實)", value="stabilityai/stable-diffusion-3-5-large"),
-        
-        # --- 動漫/二次元專精 ---
-        app_commands.Choice(name="Animagine XL 3.1 (動漫二次元)", value="cagliostrolab/animagine-xl-3.1"),
-        app_commands.Choice(name="Pony Diffusion V6 (精緻動漫)", value="strangerzonehf/Pony-Diffusion-V6-XL"),
-        
-        # --- 藝術/風格化 ---
-        app_commands.Choice(name="Kandinsky 2.2 (油畫/抽象藝術)", value="kandinsky-community/kandinsky-2-2-decoder"),
-        app_commands.Choice(name="Stable Diffusion XL 1.0 (經典風格)", value="stabilityai/stable-diffusion-xl-base-1.0"),
-        
-        # --- 創意與特色 ---
-        app_commands.Choice(name="DreamShaper 8 (寫實動漫混合)", value="Lykon/dreamshaper-8"),
-        app_commands.Choice(name="OpenDalle V1.1 (電影感/插畫)", value="dataautogpt3/OpenDalle")
+        app_commands.Choice(name="Flux.1 Schnell (最推薦/全能 - 便宜)", value="black-forest-labs/FLUX.1-schnell"),
+        app_commands.Choice(name="DreamShaper 8 (寫實動漫混合 - 最便宜)", value="Lykon/dreamshaper-8"),
+        app_commands.Choice(name="SD 3.5 Large (推薦/寫實 - 較貴)", value="stabilityai/stable-diffusion-3.5-large")
     ]
 )
 async def imagine_slash(interaction: discord.Interaction, prompt: str, model: str = "black-forest-labs/FLUX.1-schnell"):
-    # 這裡直接呼叫清理過後的 ai_imagine 函式
     await ai_imagine(interaction, prompt, model)
 
 @bot.tree.command(name="ai", description="向 AI 提問")
