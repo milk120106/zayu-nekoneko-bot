@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from datetime import time as datetime_time
 
 # 第三方套件
+from huggingface_hub import InferenceClient
 from openai import OpenAI
 from litellm import acompletion
 from dotenv import load_dotenv
@@ -505,13 +506,14 @@ def create_embed(description):
     return embed
 
 MODEL_CHOICES = [
-    # --- Google Gemini 系列 ---
+    # --- Google Gemini 系列 (必須改為 gemini/ 前綴) ---
     app_commands.Choice(name="Gemini 3.5 Flash [平衡]", value="gemini/gemini-3.5-flash"),
-    app_commands.Choice(name="Gemini 3.1 Flash Lite [最便宜]", value="gemini/gemini-3.1-flash-lite"),
-    app_commands.Choice(name="Gemini 3.1 Pro [平衡]", value="gemini/gemini-3.1-pro-preview"),
-    app_commands.Choice(name="Gemini Pro [較貴]", value="gemini/gemini-pro-latest"),
-    app_commands.Choice(name="Gemini Flash [便宜]", value="gemini/gemini-flash-latest"),
-    app_commands.Choice(name="Gemini Flash-Lite [最便宜]", value="gemini/gemini-flash-lite-latest"),
+    app_commands.Choice(name="Gemini 3.1 Flash-Lite [便宜]", value="gemini/gemini-3.1-flash-lite"),
+    app_commands.Choice(name="Gemini 3 Flash 預先發布版 [普通]", value="gemini/gemini-3-flash-preview"),  
+    app_commands.Choice(name="Gemini 2.5 Flash [普通]", value="gemini/gemini-2.5-flash"), 
+    app_commands.Choice(name="Gemini 2.5 Flash-Lite [便宜]", value="gemini/gemini-2.5-flash-lite"), 
+    app_commands.Choice(name="gemma 4 26b a4b it [最便宜]", value="gemini/gemma-4-26b-a4b-it"),
+    app_commands.Choice(name="gemma 4 31b it [超便宜]", value="gemini/gemma-4-31b-it"),
 
     # --- Groq 系列 ---
     app_commands.Choice(name="Llama 3.3 70B (Groq) [較貴]", value="groq/llama-3.3-70b-versatile"),
@@ -519,14 +521,20 @@ MODEL_CHOICES = [
     app_commands.Choice(name="Qwen 2.5 Coder 32B (Groq) [平衡]", value="groq/qwen-2.5-coder-32b"),
 
     # --- HuggingFace 系列 ---
-    app_commands.Choice(name="Hermes 3 Llama 3.1 8B (HF) [最推薦 - 最便宜]", value="NousResearch/Hermes-3-Llama-3.1-8B:cheapest"),
-    app_commands.Choice(name="DeepSeek V3 0324 (HF) [推薦 - 平衡]", value="deepseek-ai/DeepSeek-V3-0324:cheapest"),
-    app_commands.Choice(name="Qwen 2.5 7B Instruct (HF) [便宜]", value="Qwen/Qwen2.5-7B-Instruct:cheapest"),
-    app_commands.Choice(name="Qwen 2.5 32B Instruct (HF) [平衡 - 較貴]", value="Qwen/Qwen2.5-32B-Instruct:cheapest"),
+    app_commands.Choice(name="Hermes 3 Llama 3.1 8B (HF) [最推薦 - 最便宜]", value="huggingface/NousResearch/Hermes-3-Llama-3.1-8B"),
+    app_commands.Choice(name="DeepSeek V3 0324 (HF) [推薦 - 平衡]", value="huggingface/deepseek-ai/DeepSeek-V3-0324"),
+    app_commands.Choice(name="Qwen 2.5 7B Instruct (HF) [便宜]", value="huggingface/Qwen/Qwen2.5-7B-Instruct"),
+    app_commands.Choice(name="Qwen 2.5 32B Instruct (HF) [平衡 - 較貴]", value="huggingface/Qwen/Qwen2.5-32B-Instruct"),
+
+    # --- OpenRouter 系列 ---
+    app_commands.Choice(name="Qwen3 Coder 480B [程式開發]", value="openrouter/qwen/qwen-3-coder-480b-a35b:free"),
+    app_commands.Choice(name="Hermes 3 405B [高難度推理]", value="openrouter/nousresearch/hermes-3-405b:free"),
+    app_commands.Choice(name="Liquid LFM 1.2B [極速輕量]", value="openrouter/liquid/lfm-2.5-1.2b-instruct:free"),
+    app_commands.Choice(name="Venice Uncensored [無限制]", value="openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free"),
 
     # --- 數據處理 ---
-    app_commands.Choice(name="Gemini Embedding 1 (數據處理)", value="gemini/text-embedding-004"),
-    app_commands.Choice(name="Gemini Embedding 2 (數據處理)", value="gemini/text-embedding-005")
+    app_commands.Choice(name="Gemini Embedding (數據處理)", value="gemini/gemini-embedding-001"),
+    app_commands.Choice(name="Gemini Embedding 2 (數據處理)", value="gemini/gemini-embedding-2")
 ]
 
 
@@ -594,8 +602,8 @@ def extract_image_urls(message_obj, prompt: str):
     unique_urls = list(dict.fromkeys(image_urls))
     return unique_urls[:5]
 
-async def get_ai_response(interaction_or_message, prompt: str, model_value: str, setting: str = "雜魚小貓娘", thinking_level: str = "medium"):
-    # 1. 記憶體隔離 (以頻道 ID 作為 Key，避免多人對話混亂)
+async def get_ai_response(interaction_or_message, prompt: str, model_value: str, setting: str = "雜魚小貓娘"):
+    # 1. 記憶體隔離
     cid = str(interaction_or_message.channel.id)
     if cid not in memory_storage:
         memory_storage[cid] = {"ai_messages": []}
@@ -609,35 +617,45 @@ async def get_ai_response(interaction_or_message, prompt: str, model_value: str,
     for url in image_urls:
         content.append({"type": "image_url", "image_url": {"url": url}})
     
-    # 3. 維護對話記憶體 (限制 20 則)
+    # 3. 維護對話記憶體
     storage["ai_messages"].append({"role": "user", "content": content})
     if len(storage["ai_messages"]) > 20:
         storage["ai_messages"] = storage["ai_messages"][-20:]
     
-    # 準備 API 訊息格式
     api_messages = [{"role": "system", "content": SYSTEM_PROMPTS.get(setting, SYSTEM_PROMPTS["雜魚小貓娘"])}]
     api_messages.extend(storage["ai_messages"])
 
-    # 互動回應延遲處理
     if is_interaction and not interaction_or_message.response.is_done():
         await interaction_or_message.response.defer()
 
     try:
         start_time = time_lib.perf_counter()
         
-        # 4. 建構 LiteLLM 請求參數
+        # 4. 動態路由配置
+        provider = model_value.split('/')[0]
         kwargs = {
             "model": model_value,
             "messages": api_messages,
-            "timeout": 30,
-            "api_base": "https://router.huggingface.co/v1",
-            "api_key": os.getenv("HF_TOKEN")
+            "timeout": 45,
         }
+
+        # 根據 Provider 指派對應的環境變數與 API 基底
+        if provider == "gemini":
+            kwargs["api_key"] = os.getenv("GOOGLE_API_KEY")
+        elif provider == "groq":
+            kwargs["api_base"] = "https://api.groq.com/openai/v1"
+            kwargs["api_key"] = os.getenv("GROQ_API_KEY")
+        elif provider == "huggingface":
+            kwargs["api_base"] = "https://router.huggingface.co/v1"
+            kwargs["api_key"] = os.getenv("HUGGINGFACE_API_KEY")
+        elif provider == "openrouter":
+            kwargs["api_base"] = "https://openrouter.ai/api/v1"
+            kwargs["api_key"] = os.getenv("OPENROUTER_API_KEY")
         
         # 執行 API 呼叫
         response = await acompletion(**kwargs)
         
-        # 5. 結果處理與記憶體更新
+        # 5. 結果處理
         ai_reply = response.choices[0].message.content
         storage["ai_messages"].append({"role": "assistant", "content": ai_reply})
         
@@ -646,7 +664,7 @@ async def get_ai_response(interaction_or_message, prompt: str, model_value: str,
         total_tokens = response.usage.total_tokens if response.usage else "未知"
         footer_text = f"模式: {setting} | 模型: {model_used} | 耗時: {elapsed_time}s | Tokens: {total_tokens}"
         
-        # 6. 防截斷處理 (使用 byte 長度判斷，避免超過 Discord 限制)
+        # 6. 防截斷處理與輸出
         if len(ai_reply.encode('utf-8')) > 3800:
             file_name = f"response_{int(time_lib.time())}.txt"
             file = discord.File(io.StringIO(ai_reply), filename=file_name)
@@ -671,11 +689,15 @@ async def ai_imagine(interaction: discord.Interaction, prompt: str, model_value:
     try:
         # 1. 翻譯為英文
         try:
-            english_prompt = await asyncio.wait_for(
-                asyncio.to_thread(GoogleTranslator(source='auto', target='en').translate, prompt),
-                timeout=10
-            )
-        except Exception:
+            # 使用 deep-translator 強制翻譯
+            translator = GoogleTranslator(source='auto', target='en')
+            english_prompt = await asyncio.to_thread(translator.translate, prompt)
+            
+            # 若翻譯結果為 None 或空字串，則回退原字串
+            if not english_prompt:
+                english_prompt = prompt
+        except Exception as e:
+            print(f"翻譯錯誤: {e}")
             english_prompt = prompt
 
         # 2. 獲取顯示名稱
@@ -714,7 +736,7 @@ async def ai_imagine(interaction: discord.Interaction, prompt: str, model_value:
         file = discord.File(fp=img_byte_arr, filename="image.png")
         embed = discord.Embed(
             title="✨ 生圖完成喵！🐾", 
-            description=f"**提示詞:** `{english_prompt}`", 
+            description=f"**提示詞(已翻譯):** `{english_prompt}`", 
             color=0xffb6c1
         )
         embed.set_image(url="attachment://image.png")
@@ -1056,19 +1078,17 @@ async def on_message(message: discord.Message):
         if "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
             await message.reply(f"<@{DEVELOPER_ID}>")
 
-    elif is_keyword_enabled:
-        # 其他人的提及關鍵字判斷
-        if "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
+    elif "milk120106" in content.lower() or str(DEVELOPER_ID) in content:
             await message.reply(f"<@{DEVELOPER_ID}>")
-        # 一般關鍵字判斷
-        elif "色色" in content: await message.reply("喵！禁止色色！")
-        elif content == "6": await message.reply("7")
-        elif "男娘" in content:
-            await message.reply(embed=discord.Embed(description="「南梁滅亡...（略）...就『高朝』了。」", color=0xffc0cb))
-            await check_and_notify_achievement(message, "HISTORICAL_TROLL", ACHIEVEMENTS["HISTORICAL_TROLL"])
-        elif "刀" in content:
-            try: await message.reply(file=discord.File(KNIFE_IMAGE_PATH))
-            except: pass
+    # 一般關鍵字判斷
+    elif "色色" in content: await message.reply("喵！禁止色色！https://cdn.discordapp.com/attachments/1493902370013188221/1515613168704028754/4eb4bf45628731ca.jpg?ex=6a324742&is=6a30f5c2&hm=db69cb8546c1cf4e3e58e9247fefc17385d6f2c248d542d7f83e5d2cecae1d0e&")
+    elif content == "6": await message.reply("7")
+    elif "男娘" in content:
+        await message.reply(embed=discord.Embed(description="「很多人都說南梁的結局是北朝，事實上這並不準確。南梁滅亡是因為侯景的入侵，所以南梁的結局是『侯入』；而侯景曾是北齊的將領，北齊皇帝姓高，所以又稱為『高朝』。因此，南梁先是被『侯入』，然後『北齊』，最後就『高朝』了。」", color=0xffc0cb))
+        await check_and_notify_achievement(message, "HISTORICAL_TROLL", ACHIEVEMENTS["HISTORICAL_TROLL"])
+    elif "刀" in content:
+        try: await message.reply(file=discord.File(KNIFE_IMAGE_PATH))
+        except: pass
 
     # 5. 確保前綴指令正確分發
     await bot.process_commands(message)
@@ -2099,7 +2119,7 @@ async def imagine_slash(interaction: discord.Interaction, prompt: str, model: st
 @app_commands.describe(
     model="選擇 AI 模型",
     prompt="輸入內容",
-    setting="選擇性格模式"
+    setting="選擇性格模式 (預設為雜魚小貓娘)"
 )
 @app_commands.choices(
     setting=[
@@ -2118,10 +2138,10 @@ async def ai_slash(
     interaction: discord.Interaction, 
     model: str, 
     prompt: str, 
-    setting: str = "雜魚小貓娘",
-    thinking_level: str = "medium"
+    setting: Optional[str] = "雜魚小貓娘"
 ):
-    await get_ai_response(interaction, prompt, model, setting, thinking_level)
+    await interaction.response.defer()
+    await get_ai_response(interaction, prompt, model, setting)
 
 @ai_slash.autocomplete("model")
 async def model_autocomplete(interaction: discord.Interaction, current: str):
